@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<title>导航三维回放</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --dim:#8b949e; --acc:#58a6ff; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+              font-family:"Segoe UI",system-ui,-apple-system,sans-serif; overflow:hidden; }
+  #app { display:flex; flex-direction:column; height:100%; }
+  #toolbar { display:flex; align-items:center; gap:10px; padding:8px 12px;
+             background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  #toolbar .title { font-weight:600; font-size:14px; color:var(--acc); }
+  #hud { display:flex; gap:18px; padding:6px 12px; background:#0d1117;
+         border-bottom:1px solid var(--line); font:12px/1.5 "Consolas",monospace; flex-wrap:wrap; }
+  #hud b { color:var(--acc); font-weight:600; }
+  #hud .dim { color:var(--dim); }
+  #stage { flex:1; position:relative; background:var(--bg); min-height:0; }
+  #stage canvas { position:absolute; inset:0; width:100%; height:100%; display:block; cursor:grab; }
+  #stage canvas.dragging { cursor:grabbing; }
+  #stage .tag { position:absolute; top:6px; left:8px; z-index:2; font-size:11px; color:var(--dim);
+                background:rgba(13,17,23,.7); padding:2px 7px; border-radius:4px; pointer-events:none; }
+  #timeline { display:flex; align-items:center; gap:10px; padding:8px 12px;
+              background:var(--panel); border-top:1px solid var(--line); }
+  #timeline input[type=range] { flex:1; }
+  #tlabel { font:12px "Consolas",monospace; color:var(--dim); white-space:nowrap; min-width:130px; }
+  button, select { background:#21262d; color:var(--fg); border:1px solid var(--line);
+                   border-radius:6px; padding:4px 10px; font-size:12px; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  button.active { background:var(--acc); color:#04121f; border-color:var(--acc); }
+  .legend { display:flex; gap:10px; font-size:11px; color:var(--dim); align-items:center; }
+  .legend .sw { display:inline-block; width:12px; height:12px; border-radius:2px; vertical-align:-2px; margin-right:4px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <span class="title">导航三维回放 <span style="color:var(--dim);font-weight:400;">(v3-单视图)</span></span>
+    <button id="btnLive" class="active">实时</button>
+    <button id="btnReplay">回放</button>
+    <select id="selRec" title="选择录制" style="max-width:360px;"><option value="">录制…</option></select>
+    <button id="btnRefresh" title="重新扫描">↻</button>
+    <button id="btnPlay">▶ 播放</button>
+    <select id="selSpeed">
+      <option value="0.25">0.25×</option><option value="0.5">0.5×</option>
+      <option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option>
+    </select>
+    <span class="legend">
+      <span><span class="sw" style="background:#58a6ff"></span>实际轨迹</span>
+      <span><span class="sw" style="background:#ffa657"></span>A* 路径</span>
+      <span><span class="sw" style="background:#7ee787"></span>B-spline 轨迹</span>
+      <span><span class="sw" style="background:#ff7b72"></span>目标</span>
+      <span><span class="sw" style="background:#ff5050"></span>占据</span>
+      <span><span class="sw" style="background:#78beff"></span>规划/感知范围</span>
+    </span>
+    <span id="status" style="color:var(--dim);font-size:11px;">连接中…</span>
+  </div>
+  <div id="hud">
+    <span>位置 <b id="hPos">-</b></span>
+    <span>速度 <b id="hVel">-</b> <span class="dim">|v|=</span><b id="hVmag">-</b></span>
+    <span>加速度 <b id="hAcc">-</b></span>
+    <span class="dim">目标距离</span> <b id="hGoalDist">-</b>
+  </div>
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <span class="tag">点云 + 路径（左键旋转 · Shift/右键平移 · 滚轮缩放，绕无人机）</span>
+  </div>
+  <div id="timeline">
+    <span id="tlabel">0.0s / 0.0s</span>
+    <input type="range" id="scrub" min="0" max="1000" value="0" step="1">
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ============================ 数据 ============================ */
+let states = [];      // {t, p:[x,y,z], v:[..], a:[..], yaw}
+let points = [];      // {t, pts:[x1,y1,z1,...]}
+let plans  = [];      // {t, goal, path:[[..]], traj:[[..]], ctrl:[[..]]}
+let maps   = [];      // {t, occ:[x1,y1,z1,...]}
+let goal   = null;
+let mapSize = [40, 40, 10]; // 米，规划范围(=局部体素图 x/y/z)，感知框尺寸（无录制信息时回退默认）
+let t0 = 0, tEnd = 0;
+let curT = 0, playing = false, speed = 1.0, mode = "live";
+let liveTimer = null;
+
+/* ============================ 相机（绕无人机 + 平移） ============================ */
+// 世界 NED (x北,y东,z下) -> 显示坐标 (X东, Y上, Z北)
+function w2d(p){ return [p[1], -p[2], p[0]]; }
+// cam.pan 为相对无人机的平移偏移（显示坐标）
+const cam = { yaw: -0.9, pitch: 0.45, dist: 45, pan: [0, 0, 0] };
+
+function camCenter(){
+  const st = lerpState(curT);
+  const base = st ? w2d(st.p) : (goal ? w2d(goal) : [0,0,0]);
+  return [base[0]+cam.pan[0], base[1]+cam.pan[1], base[2]+cam.pan[2]];
+}
+function camProject(pd, w, h){
+  const c = camCenter();
+  const x = pd[0]-c[0], y = pd[1]-c[1], z = pd[2]-c[2];
+  const cy=Math.cos(cam.yaw), sy=Math.sin(cam.yaw);
+  const x1 = x*cy + z*sy, z1 = -x*sy + z*cy;
+  const cp=Math.cos(cam.pitch), sp=Math.sin(cam.pitch);
+  const y2 = y*cp - z1*sp, z2 = y*sp + z1*cp + cam.dist;
+  if (z2 <= 0.05) return null;
+  const f = Math.min(w,h) * 1.1;
+  return [w/2 + f*x1/z2, h/2 - f*y2/z2];
+}
+
+function heightColor(alt){  // alt = -z = 高度(米)
+  const t = Math.max(0, Math.min(1, (alt + 2) / 22));
+  const r = Math.round(40 + t*215), g = Math.round(120 + (1-t)*120), b = Math.round(255 - t*180);
+  return `rgb(${r},${g},${b})`;
+}
+
+/* ============================ 取数（按时间） ============================ */
+function lerpState(t){
+  if (!states.length) return null;
+  if (t <= states[0].t) return states[0];
+  if (t >= states[states.length-1].t) return states[states.length-1];
+  let lo=0, hi=states.length-1;
+  while (hi-lo>1){ const m=(lo+hi)>>1; if(states[m].t<=t) lo=m; else hi=m; }
+  const A=states[lo], B=states[hi], f=(t-A.t)/Math.max(1e-6,B.t-A.t);
+  const L=(a,b)=>[a[0]+(b[0]-a[0])*f, a[1]+(b[1]-a[1])*f, a[2]+(b[2]-a[2])*f];
+  return { t, p:L(A.p,B.p), v:L(A.v,B.v), a:L(A.a,B.a), yaw:A.yaw };
+}
+function latestIdx(arr, t){
+  let lo=0, hi=arr.length-1, ans=-1;
+  while(lo<=hi){ const m=(lo+hi)>>1; if(arr[m].t<=t){ans=m;lo=m+1;} else hi=m-1; }
+  return ans;
+}
+function trailUpTo(t){ const out=[]; for(const s of states){ if(s.t<=t) out.push(s.p); } return out; }
+
+/* ============================ 绘制（单视图） ============================ */
+function clearCv(){
+  const cv=document.getElementById("cv"); const dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth, h=cv.clientHeight;
+  if (cv.width!==w*dpr || cv.height!==h*dpr){ cv.width=w*dpr; cv.height=h*dpr; }
+  const ctx=cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.fillStyle="#0d1117"; ctx.fillRect(0,0,w,h); return {ctx,w,h};
+}
+function drawPoints(ctx,w,h,ptsFlat){
+  const n = ptsFlat.length/3;
+  for(let i=0;i<n;i++){
+    const s = camProject(w2d([ptsFlat[i*3],ptsFlat[i*3+1],ptsFlat[i*3+2]]), w, h);
+    if(!s) continue;
+    ctx.fillStyle = heightColor(-ptsFlat[i*3+2]);
+    ctx.fillRect(s[0],s[1],1.4,1.4);
+  }
+}
+function polyline(ctx,w,h,pts,color,lw){
+  ctx.strokeStyle=color; ctx.lineWidth=lw; ctx.beginPath();
+  let started=false;
+  for(const p of pts){ const s=camProject(w2d(p),w,h); if(!s) continue;
+    if(!started){ctx.moveTo(s[0],s[1]);started=true;} else ctx.lineTo(s[0],s[1]); }
+  ctx.stroke();
+}
+function drawGoal(ctx,w,h,g){
+  const s=camProject(w2d(g),w,h); if(!s) return;
+  ctx.strokeStyle="#ff7b72"; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(s[0]-8,s[1]); ctx.lineTo(s[0]+8,s[1]);
+  ctx.moveTo(s[0],s[1]-8); ctx.lineTo(s[0],s[1]+8); ctx.stroke();
+}
+function drawFlat(ctx,w,h,flat,color,size){
+  const n = flat.length/3;
+  ctx.fillStyle=color;
+  for(let i=0;i<n;i++){
+    const s = camProject(w2d([flat[i*3],flat[i*3+1],flat[i*3+2]]), w, h);
+    if(!s) continue;
+    ctx.fillRect(s[0]-size/2, s[1]-size/2, size, size);
+  }
+}
+// 无人机感知/规划框：以当前无人机位置为中心、mapSize 为边长的线框长方体。
+// 该范围 = 局部体素图（A*/规划域）；超出此范围，即便被 LiDAR 探测到也不用于规划，等同未知。
+function drawPerceptionFrame(ctx,w,h){
+  const st = lerpState(curT);
+  if(!st || !mapSize) return;
+  const [sx,sy,sz] = mapSize;
+  const hx = sx/2, hy = sy/2, hz = sz/2;
+  const c = st.p;  // 世界 NED [x北,y东,z下]
+  ctx.strokeStyle = "rgba(120,190,255,0.6)";
+  ctx.lineWidth = 1;
+  const seg=(A,B)=>{
+    const a=camProject(w2d(A),w,h), b=camProject(w2d(B),w,h);
+    if(a && b){ ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]); ctx.stroke(); }
+  };
+  // x 向 4 条棱
+  for(const syy of [-hy,hy]) for(const szz of [-hz,hz])
+    seg([c[0]-hx, c[1]+syy, c[2]+szz], [c[0]+hx, c[1]+syy, c[2]+szz]);
+  // y 向 4 条棱
+  for(const sxx of [-hx,hx]) for(const szz of [-hz,hz])
+    seg([c[0]+sxx, c[1]-hy, c[2]+szz], [c[0]+sxx, c[1]+hy, c[2]+szz]);
+  // z 向 4 条棱
+  for(const sxx of [-hx,hx]) for(const syy of [-hy,hy])
+    seg([c[0]+sxx, c[1]+syy, c[2]-hz], [c[0]+sxx, c[1]+syy, c[2]+hz]);
+}
+
+function render(){
+  const {ctx,w,h}=clearCv();
+  // 占据图：仅 occupied(红)（真实命中）；unknown 不再填图层，改用感知框表示探测范围
+  const mi=latestIdx(maps, curT);
+  if(mi>=0){
+    const mp=maps[mi];
+    if(mp.occ && mp.occ.length) drawFlat(ctx,w,h, mp.occ, "rgba(255,80,80,0.8)", 4);
+  }
+  // 无人机感知框（探测范围球）
+  drawPerceptionFrame(ctx,w,h);
+  // 点云
+  const si=latestIdx(points, curT);
+  if(si>=0) drawPoints(ctx,w,h, points[si].pts);
+  // 实际轨迹
+  polyline(ctx,w,h, trailUpTo(curT), "#58a6ff", 2);
+  // A* 路径 + B-spline
+  const pi=latestIdx(plans, curT);
+  if(pi>=0){
+    const pl=plans[pi];
+    if(pl.path.length) polyline(ctx,w,h, pl.path, "#ffa657", 1.5);
+    if(pl.traj.length) polyline(ctx,w,h, pl.traj, "#7ee787", 2.5);
+    if(pl.ctrl.length){ ctx.fillStyle="#7ee787"; for(const c of pl.ctrl){
+      const s=camProject(w2d(c),w,h); if(s) ctx.fillRect(s[0]-2.5,s[1]-2.5,5,5); } }
+  }
+  if(goal) drawGoal(ctx,w,h, goal);
+  // 无人机当前位置
+  const st=lerpState(curT); if(st){ const s=camProject(w2d(st.p),w,h);
+    if(s){ ctx.fillStyle="#fff"; ctx.beginPath(); ctx.arc(s[0],s[1],5,0,Math.PI*2); ctx.fill(); } }
+  updateHUD();
+}
+
+/* ============================ HUD ============================ */
+function updateHUD(){
+  const st=lerpState(curT);
+  const fmt=(a)=> a? a.map(x=>x.toFixed(2)).join(", ") : "-";
+  if(st){
+    document.getElementById("hPos").textContent = fmt(st.p);
+    document.getElementById("hVel").textContent = fmt(st.v);
+    document.getElementById("hVmag").textContent = Math.hypot(...st.v).toFixed(2)+" m/s";
+    document.getElementById("hAcc").textContent = fmt(st.a);
+  }
+  if(goal && st){
+    const dx=st.p[0]-goal[0], dy=st.p[1]-goal[1], dz=st.p[2]-goal[2];
+    document.getElementById("hGoalDist").textContent = Math.hypot(dx,dy,dz).toFixed(2)+" m";
+  }
+  document.getElementById("tlabel").textContent =
+    `${(curT-t0).toFixed(1)}s / ${(tEnd-t0).toFixed(1)}s`;
+}
+
+/* ============================ 时间轴 ============================ */
+const scrub = document.getElementById("scrub");
+function refreshRange(){
+  if(!states.length){ t0=tEnd=0; } else { t0=states[0].t; tEnd=Math.max(states[states.length-1].t, t0+0.001); }
+  curT=Math.min(Math.max(curT,t0),tEnd);
+}
+function scrubToTime(){ curT = t0 + (+scrub.value/1000)*(tEnd-t0); }
+
+/* ============================ 循环 ============================ */
+let last=performance.now();
+function frame(now){
+  const dt=(now-last)/1000; last=now;
+  if(playing){ curT += dt*speed; if(curT>=tEnd){curT=tEnd; playing=false; setPlay(false);} }
+  if(mode==="replay") scrub.value = Math.round((curT-t0)/Math.max(1e-6,tEnd-t0)*1000);
+  render();
+  requestAnimationFrame(frame);
+}
+function setPlay(on){
+  playing=on; document.getElementById("btnPlay").textContent = on? "⏸ 暂停":"▶ 播放";
+  document.getElementById("btnPlay").classList.toggle("active", on);
+}
+
+/* ============================ 实时 / 回放 ============================ */
+let libraryMode = false;
+async function loadStatus(){
+  try{
+    const r=await fetch("/api/status").then(x=>x.json());
+    libraryMode = !!r.library;
+    let s = `实时:${r.live? "有":"无"}`;
+    if(r.library) s += `  录制库:${r.recordings} 条`;
+    else if(r.replay) s += `  单段回放`;
+    document.getElementById("status").textContent = s;
+    if(r.live) startLive();
+    if(r.library) await refreshRecordings();
+    else if(r.replay) await loadSingleReplay();
+  }catch(e){
+    document.getElementById("status").textContent = "无法连接服务器："+e.message;
+    console.error(e);
+  }
+}
+async function refreshRecordings(){
+  try{
+    const list=await fetch("/api/recordings").then(x=>x.json());
+    const sel=document.getElementById("selRec");
+    sel.innerHTML="";
+    if(!list.length){
+      const o=document.createElement("option"); o.value=""; o.textContent="无录制";
+      sel.appendChild(o);
+      document.getElementById("status").textContent="目录下没有录制（先跑一次 --record）";
+      return;
+    }
+    list.forEach((m,i)=>{
+      const dur=(m.t1!=null&&m.t0!=null)?(m.t1-m.t0).toFixed(1)+"s":"?";
+      const g=m.goal? m.goal.map(x=>Math.round(x)).join(","):"?";
+      const o=document.createElement("option"); o.value=i;
+      o.textContent=`${m.name}  目标[${g}] ${dur}  ${m.n_states}帧`;
+      sel.appendChild(o);
+    });
+    sel.value="0";
+    document.getElementById("status").textContent=`已列出 ${list.length} 条录制，加载中…`;
+    await loadRecordingById(0);
+  }catch(e){
+    document.getElementById("status").textContent="加载录制列表失败："+e.message;
+    console.error(e);
+  }
+}
+async function loadRecordingById(i){
+  document.getElementById("status").textContent=`加载录制 #${i} 中…`;
+  try{
+    const r=await fetch("/api/recording?id="+i).then(x=>x.json());
+    applyRecording(r);
+  }catch(e){
+    document.getElementById("status").textContent="加载录制失败："+e.message;
+    console.error(e);
+  }
+}
+async function loadSingleReplay(){
+  try{
+    const r=await fetch("/api/recording").then(x=>x.json());
+    applyRecording(r);
+  }catch(e){
+    document.getElementById("status").textContent="加载录制失败："+e.message;
+    console.error(e);
+  }
+}
+function applyRecording(r){
+  if(r.empty){ document.getElementById("status").textContent="无录制数据"; return; }
+  goal=r.goal||null;
+  if(r.map_size) mapSize=r.map_size;
+  states=r.states||[]; points=r.points||[]; plans=r.plans||[]; maps=r.maps||[];
+  refreshRange(); curT=t0; setPlay(false);
+  document.getElementById("btnReplay").classList.add("active");
+  document.getElementById("btnLive").classList.remove("active");
+  clearInterval(liveTimer); mode="replay";
+  document.getElementById("status").textContent =
+    `回放：${states.length} 帧 / ${points.length} 点云 / ${plans.length} 重规划`;
+}
+function appendLive(f){
+  if(f.empty) return;
+  if(f.goal) goal=f.goal;
+  if(f.map_size) mapSize=f.map_size;
+  if(f.state){ states.push({t:f.state.t,p:f.state.p,v:f.state.v,a:f.state.a,yaw:f.state.yaw}); }
+  if(f.pts && f.pts.length) points.push({t:f.state.t, pts:f.pts});
+  if(f.plan){ plans.push({t:f.plan.t, goal:f.plan.goal, path:f.plan.path, traj:f.plan.traj, ctrl:f.plan.ctrl}); }
+  refreshRange();
+  if(mode==="live" && !playing) curT=tEnd;
+}
+function startLive(){
+  mode="live";
+  document.getElementById("btnLive").classList.add("active");
+  document.getElementById("btnReplay").classList.remove("active");
+  clearInterval(liveTimer);
+  liveTimer=setInterval(async ()=>{
+    try{ const f=await fetch("/api/live").then(x=>x.json()); appendLive(f); }catch(e){}
+  }, 150);
+}
+
+/* ============================ 相机交互 ============================ */
+function bindCamera(){
+  const cv=document.getElementById("cv");
+  let drag=null, lx=0, ly=0;
+  cv.addEventListener("mousedown",e=>{
+    drag = (e.shiftKey || e.button===2) ? "pan" : "orbit";
+    lx=e.clientX; ly=e.clientY; cv.classList.add("dragging");
+  });
+  cv.addEventListener("contextmenu",e=>e.preventDefault());
+  window.addEventListener("mouseup",()=>{ drag=null; cv.classList.remove("dragging"); });
+  window.addEventListener("mousemove",e=>{
+    if(!drag) return;
+    const dx=e.clientX-lx, dy=e.clientY-ly; lx=e.clientX; ly=e.clientY;
+    if(drag==="orbit"){
+      cam.yaw += dx*0.006; cam.pitch += dy*0.006;
+      cam.pitch=Math.max(-1.4,Math.min(1.4,cam.pitch));
+    }else{
+      const s = cam.dist*0.003;
+      cam.pan[0] -= dx*s;   // 水平 → 东
+      cam.pan[1] += dy*s;   // 垂直 → 上
+    }
+  });
+  cv.addEventListener("wheel",e=>{ e.preventDefault();
+    cam.dist*=Math.pow(1.0015,e.deltaY); cam.dist=Math.max(3,Math.min(300,cam.dist));
+  },{passive:false});
+}
+
+/* ============================ 交互 ============================ */
+document.getElementById("btnLive").onclick = ()=>{ mode="live"; if(!liveTimer) startLive(); else document.getElementById("btnLive").classList.add("active"), document.getElementById("btnReplay").classList.remove("active"); };
+document.getElementById("btnReplay").onclick = ()=>{ if(libraryMode) refreshRecordings(); else loadSingleReplay(); };
+document.getElementById("btnRefresh").onclick = refreshRecordings;
+document.getElementById("selRec").onchange = e=>{ loadRecordingById(+e.target.value); };
+document.getElementById("btnPlay").onclick = ()=>{ setPlay(!playing); };
+document.getElementById("selSpeed").onchange = e=>{ speed=+e.target.value; };
+scrub.oninput = ()=>{ if(mode==="replay"){ scrubToTime(); setPlay(false); } };
+
+bindCamera();
+
+/* ============================ 启动 ============================ */
+requestAnimationFrame(frame);
+loadStatus();
+</script>
+</body>
+</html>

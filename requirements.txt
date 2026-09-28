@@ -1,0 +1,10 @@
+# NavigationPhase1 依赖（使用 CompetitionEnv/.venv，Python 3.10）
+# 已具备：airsim==1.8.1, numpy==1.26.3, opencv-contrib-python, tornado==4.5.3
+# 新增：
+numpy>=1.21
+scipy>=1.9          # 截断距离场 EDT 回退（优化专有库）
+airsim>=1.2.0
+tornado==4.5.3      # 必须 4.x，5/6 会连不上或 IOLoop 异常
+
+# 仅构建 C++ 加速扩展时需要的（运行时非必需）：
+# pybind11>=2.10
