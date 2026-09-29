@@ -67,49 +67,9 @@ class OccupancyMap:
     def mark_occupied(self, i: int, j: int, k: int) -> None:
         self.set_voxel(i, j, k, OCCUPIED)
 
-    def mark_visible_free(self, center, max_range: float) -> None:
-        """把从 ``center`` 出发、在 ``max_range`` 内、且不被占据体素遮挡的 Unknown 标为 Free。
-
-        全包围 LiDAR 的"无回波方向"即开放空域（如头顶天空），应视为已探明的空闲；
-        但被障碍遮挡的后方必须保持 Unknown。实现：在**非占据空间（FREE+UNKNOWN）**上做
-        26 连通分量标记，载具体素所在分量即"从载具出发、不被障碍遮挡、可达的已知+未知
-        空域"；把其中 ``max_range`` 内的 UNKNOWN 标 FREE。
-
-        OCCUPIED 阻断连通 → 障碍后方保持 UNKNOWN（A* 不会穿墙）。
-        滚动窗口清零产生的"UNKNOWN 洞"（即"遗忘障碍"）由 seed_local 在上游用持久图回填
-        OCCUPIED 消除，故此处 UNKNOWN 只会是真正的开放空域（天空/未探索前方），标 FREE 不会穿墙。
-        """
-        try:
-            from scipy import ndimage as _ndi
-        except Exception:
-            return  # 无 scipy 时保守跳过（本工程距离场已依赖 scipy，正常不会走到）
-        ci, cj, ck = self.world_to_voxel(center)
-        if not self.in_bounds(ci, cj, ck):
-            return
-        if self.data[ci, cj, ck] == OCCUPIED:
-            return  # 载具体素被占据（异常），保守跳过
-        # 载具体素必为空闲（无人机自身位置），显式标 FREE 作为泛洪种子。
-        self.data[ci, cj, ck] = FREE
-        # 可泛洪空间 = FREE + UNKNOWN（OCCUPIED 阻断传播 → 障碍后方保持未知）。
-        traversable = self.data != OCCUPIED
-        labels, _ = _ndi.label(traversable, structure=np.ones((3, 3, 3), dtype="int8"))
-        dl = int(labels[ci, cj, ck])
-        if dl == 0:
-            return
-        in_comp = labels == dl
-        r2 = float(max_range) * float(max_range)
-        cx, cy, cz = float(center[0]), float(center[1]), float(center[2])
-        i = np.arange(self.nx)[:, None]
-        j = np.arange(self.ny)[None, :]
-        wx = self.origin[0] + (i + 0.5) * self.res
-        wy = self.origin[1] + (j + 0.5) * self.res
-        dxy2 = (wx - cx) ** 2 + (wy - cy) ** 2
-        for k in range(self.nz):
-            wz = self.origin[2] + (k + 0.5) * self.res
-            d2 = dxy2 + (wz - cz) ** 2
-            slab = self.data[:, :, k]
-            mask = (d2 <= r2) & (slab == UNKNOWN) & in_comp[:, :, k]
-            slab[mask] = FREE
+    def mark_visible_free(self, center, max_range):
+        """Deprecated compatibility no-op: connectivity is not a beam observation."""
+        return None
 
     def inflate_sensor_footprint(self, center, dtheta_h_rad: float, dtheta_v_rad: float) -> None:
         """距离相关的传感器脚印膨胀（与车辆碰撞膨胀分离）。

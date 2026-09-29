@@ -110,6 +110,8 @@ void raycast_batch(py::array_t<double, py::array::c_style> origins,
     const double ox = og(0), oy = og(1), oz = og(2);
     const double max_range2 = max_range * max_range;
 
+    py::gil_scoped_release release;
+    std::vector<std::int8_t> batch(nx * ny * nz, UNKNOWN);
     std::vector<int> cells;
     cells.reserve(256);
 
@@ -118,7 +120,7 @@ void raycast_batch(py::array_t<double, py::array::c_style> origins,
         double ex = h(r, 0), ey = h(r, 1), ez = h(r, 2);
         double lx = ex - sx, ly = ey - sy, lz = ez - sz;
         double len2 = lx * lx + ly * ly + lz * lz;
-        if (len2 > max_range2) continue;
+        if (!std::isfinite(len2) || len2 > max_range2) continue;
 
         double gx0 = (sx - ox) / res, gy0 = (sy - oy) / res, gz0 = (sz - oz) / res;
         double gx1 = (ex - ox) / res, gy1 = (ey - oy) / res, gz1 = (ez - oz) / res;
@@ -132,22 +134,27 @@ void raycast_batch(py::array_t<double, py::array::c_style> origins,
             continue;
         }
         // Along the ray (excluding start) -> free; endpoint -> occupied.
-        for (int t = 1; t < n - 1; ++t) {
+        for (int t = 0; t < n - 1; ++t) {
             int ix = cells[t * 3], iy = cells[t * 3 + 1], iz = cells[t * 3 + 2];
             if (ix >= 0 && ix < nx && iy >= 0 && iy < ny && iz >= 0 && iz < nz)
-                m(ix, iy, iz) = FREE;
+                batch[(ix*ny+iy)*nz+iz] = std::max(batch[(ix*ny+iy)*nz+iz], FREE);
         }
         {
             int ix = cells[(n - 1) * 3], iy = cells[(n - 1) * 3 + 1], iz = cells[(n - 1) * 3 + 2];
             if (ix >= 0 && ix < nx && iy >= 0 && iy < ny && iz >= 0 && iz < nz)
-                m(ix, iy, iz) = OCCUPIED;
+                batch[(ix*ny+iy)*nz+iz] = OCCUPIED;
         }
+    }
+    for (int i=0;i<nx;++i) for(int j=0;j<ny;++j) for(int k=0;k<nz;++k) {
+        auto value=batch[(i*ny+j)*nz+k];
+        if(value!=UNKNOWN) m(i,j,k)=value;
     }
 }
 
 void register_fast_planning(py::module_& m);
 
 PYBIND11_MODULE(_fast, m) {
+    m.attr("source_hash") = NAV_SOURCE_HASH;
     m.doc() = "Phase-1 navigation C++ kernels (3D DDA ray casting, B-spline, A*)";
     m.def("raycast_batch", &raycast_batch,
           py::arg("origins"), py::arg("hits"), py::arg("occ"),

@@ -21,12 +21,8 @@ from typing import List, Optional
 
 import numpy as np
 
-try:
-    from . import _fast  # type: ignore
-    USING_FAST = True
-except Exception:
-    _fast = None
-    USING_FAST = False
+from .backend import native as _fast
+USING_FAST = _fast is not None
 
 
 # 均匀三次 B-spline 基（u ∈ [0,1]，作用于控制点 P0..P3）
@@ -115,31 +111,8 @@ def encode_initial_state(p_s, v_s, a_s, dt):
 # 距离场查询（三线性插值）
 # ---------------------------------------------------------------------------
 def _dist_at(p, dist, origin, res):
-    g = (np.asarray(p, dtype="float64") - origin) / res
-    i = np.floor(g).astype("int64")
-    f = g - i
-    nx, ny, nz = dist.shape
-    d = np.zeros(8)
-    cnt = 0
-    for dx in (0, 1):
-        for dy in (0, 1):
-            for dz in (0, 1):
-                ix, iy, iz = i[0] + dx, i[1] + dy, i[2] + dz
-                if 0 <= ix < nx and 0 <= iy < ny and 0 <= iz < nz:
-                    d[cnt] = dist[ix, iy, iz]
-                else:
-                    # 越界视为远离障碍（不惩罚）。注意：必须 >= d_safe（5.0），
-                    # 否则 _psi 会误判成"贴近障碍"触发虚假惩罚；旧值 4.0 < 5.0 是 bug。
-                    d[cnt] = 1e9
-                cnt += 1
-    wx, wy, wz = f[0], f[1], f[2]
-    c00 = d[0] * (1 - wx) + d[1] * wx
-    c01 = d[2] * (1 - wx) + d[3] * wx
-    c10 = d[4] * (1 - wx) + d[5] * wx
-    c11 = d[6] * (1 - wx) + d[7] * wx
-    c0 = c00 * (1 - wy) + c10 * wy
-    c1 = c01 * (1 - wy) + c11 * wy
-    return float(c0 * (1 - wz) + c1 * wz)
+    from .geometry import distance_query
+    return float(distance_query(p, dist, origin, res)[0][0])
 
 
 def _min_clearance(traj, dist, origin, res, n_samples=200):
@@ -226,7 +199,7 @@ def optimize(ctrl0, goal, dist, map, cfg, dt, lock_first: int = 3) -> np.ndarray
 
     ctrl = np.asarray(ctrl0, dtype="float64").copy()
     origin = map.origin
-    res = cfg.res
+    res = map.res
     eps = 1e-3
     lr = float(cfg.bspline_step)
     for _ in range(int(cfg.bspline_iters)):

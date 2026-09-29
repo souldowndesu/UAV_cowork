@@ -25,30 +25,19 @@ namespace py = pybind11;
 // ---------------------------------------------------------------------------
 static double dist_at(const double* p, const float* dist, int nx, int ny, int nz,
                       const double* origin, double res) {
-    double gx = (p[0] - origin[0]) / res;
-    double gy = (p[1] - origin[1]) / res;
-    double gz = (p[2] - origin[2]) / res;
-    int ix = (int)std::floor(gx);
-    int iy = (int)std::floor(gy);
-    int iz = (int)std::floor(gz);
-    double fx = gx - ix, fy = gy - iy, fz = gz - iz;
-    double d[8];
-    for (int dx = 0; dx <= 1; dx++)
-        for (int dy = 0; dy <= 1; dy++)
-            for (int dz = 0; dz <= 1; dz++) {
-                int cx = ix + dx, cy = iy + dy, cz = iz + dz;
-                if (cx >= 0 && cx < nx && cy >= 0 && cy < ny && cz >= 0 && cz < nz)
-                    d[dx * 4 + dy * 2 + dz] = dist[(cx * ny + cy) * nz + cz];
-                else
-                    d[dx * 4 + dy * 2 + dz] = 1e9;  // 越界视为远离障碍（>=d_safe，避免虚假惩罚）
-            }
-    double c00 = d[0] * (1 - fx) + d[1] * fx;
-    double c01 = d[2] * (1 - fx) + d[3] * fx;
-    double c10 = d[4] * (1 - fx) + d[5] * fx;
-    double c11 = d[6] * (1 - fx) + d[7] * fx;
-    double c0 = c00 * (1 - fy) + c10 * fy;
-    double c1 = c01 * (1 - fy) + c11 * fy;
-    return c0 * (1 - fz) + c1 * fz;
+    double g[3]; int sizes[3]={nx,ny,nz}; int low[3],high[3]; double f[3];
+    for(int a=0;a<3;++a){
+        g[a]=(p[a]-origin[a])/res-0.5;
+        if(!std::isfinite(g[a]) || g[a]<-0.5 || g[a]>=sizes[a]-0.5) return 0.0;
+        g[a]=std::clamp(g[a],0.0,double(sizes[a]-1));
+        low[a]=int(std::floor(g[a])); high[a]=std::min(low[a]+1,sizes[a]-1); f[a]=g[a]-low[a];
+    }
+    double value=0;
+    for(int x=0;x<2;++x) for(int y=0;y<2;++y) for(int z=0;z<2;++z){
+        int i=x?high[0]:low[0],j=y?high[1]:low[1],k=z?high[2]:low[2];
+        value+=dist[(i*ny+j)*nz+k]*(x?f[0]:1-f[0])*(y?f[1]:1-f[1])*(z?f[2]:1-f[2]);
+    }
+    return value;
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +93,7 @@ static double bspline_cost(const double* ctrl, int n, const double* goal,
         double tt = (n - 1) * dt * (double)s / (double)n_samp;
         bspline_eval(ctrl, n, dt, tt, hp);
         double dd = dist_at(hp, dist, nx, ny, nz, origin, res);
-        if (dd < d_min) { double g = d_min - dd; j += w_hard * g * g; }
+        if (!std::isfinite(dd) || dd < d_min) { double g = d_min - dd; j += w_hard * g * g; }
     }
     // J_smooth (second differences) — skip the first smooth_skip terms so the
     // locked bunched start can accelerate instead of flattening the trajectory
@@ -269,7 +258,7 @@ py::array_t<double> astar_plan(
         std::int8_t s = oc(i, j, k);
         if (s == 2) return 1e30;                     // OCCUPIED
         double dd = di(i, j, k);
-        if (dd < d_min) return 1e30;                 // 净空硬截断（FREE/UNKNOWN 同）
+        if (!std::isfinite(dd) || dd < d_min) return 1e30;                 // 净空硬截断（FREE/UNKNOWN 同）
         if (s == 0) {                                 // UNKNOWN
             if (dd < d_safe) {
                 return c_unknown + w_obs * (std::exp(d_safe - dd) - 1.0);
@@ -360,6 +349,10 @@ py::array_t<double> astar_plan(
                     if (!in_bounds(ni, nj, nk)) continue;
                     double cc = voxel_cost(ni, nj, nk);
                     if (cc >= INF) continue;
+                    bool edge_ok=true;
+                    for(int x=0;x<2;++x) for(int y=0;y<2;++y) for(int z=0;z<2;++z)
+                        if(voxel_cost(ci+x*nd[m][0],cj+y*nd[m][1],ck+z*nd[m][2])>=INF) edge_ok=false;
+                    if(!edge_ok) continue;
                     double elen = std::sqrt((double)nd[m][0]*nd[m][0] + (double)nd[m][1]*nd[m][1] + (double)nd[m][2]*nd[m][2]);
                     double ng = gs + cc * elen * res;
                     if (is_start) {
@@ -405,6 +398,9 @@ py::array_t<double> astar_plan(
 }
 
 void register_fast_planning(py::module_& m) {
+    m.def("distance_at", [](py::array_t<double> p, py::array_t<float> d, py::array_t<double> o, double r){
+        return dist_at(p.data(),d.data(),int(d.shape(0)),int(d.shape(1)),int(d.shape(2)),o.data(),r);
+    });
     m.def("bspline_optimize", &bspline_optimize,
           py::arg("ctrl0"), py::arg("goal"), py::arg("dist"), py::arg("origin"),
           py::arg("res"), py::arg("dt"),

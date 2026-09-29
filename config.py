@@ -17,7 +17,7 @@ class Config:
     map_size: tuple = (40.0, 40.0, 10.0)      # (x, y, z) 米，NED 轴
     map_back_x: float = 10.0                  # 无人机在 X 方向距地图后端的距离（米）；前向余量 = map_size[0]-map_back_x
     res: float = 0.2                          # 体素边长 r_L，米
-    plan_res: float = 0.5                     # 粗路径 A* 的分辨率（§7/§24 粗网格，提速）
+    plan_res: float = 0.4                     # 粗路径 A* 的分辨率（§7/§24 粗网格，提速）
     d_max: float = 6.0                        # 截断距离场上限（§18/§67），必须 ≥ d_safe 使 φ(D) 能归零
     d_safe: float = 5.0                       # 障碍安全距离（§20/§67），软代价 ψ(D) 生效阈值（5m 安全距离）
     drone_radius: float = 0.3                 # 无人机物理半径，米（对建筑做固定膨胀，保证机身余量）

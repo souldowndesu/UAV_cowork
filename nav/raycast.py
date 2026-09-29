@@ -8,12 +8,8 @@ from __future__ import annotations
 
 import numpy as np
 
-try:
-    from . import _fast  # type: ignore
-    USING_FAST = True
-except Exception:
-    _fast = None
-    USING_FAST = False
+from .backend import native as _fast
+USING_FAST = _fast is not None
 
 
 def integrate(map, vehicle_pos, points, cfg) -> int:
@@ -30,7 +26,7 @@ def integrate(map, vehicle_pos, points, cfg) -> int:
     d = pts - np.asarray(vehicle_pos, dtype="float64")
     dist = np.linalg.norm(d, axis=1)
     min_d = float(getattr(cfg, "self_echo_dist", 0.3))
-    pts = pts[(dist >= min_d) & (dist <= cfg.max_range)]
+    pts = pts[np.isfinite(pts).all(axis=1) & (dist >= min_d) & (dist <= cfg.max_range)]
     if pts.shape[0] == 0:
         return 0
 
@@ -46,36 +42,38 @@ def integrate(map, vehicle_pos, points, cfg) -> int:
             np.ascontiguousarray(hits),
             map.data,
             np.ascontiguousarray(map.origin.astype("float64")),
-            float(cfg.res),
+            float(map.res),
             float(cfg.max_range),
         )
     else:
-        _raycast_numpy(map, origins, hits, cfg.res)
+        _raycast_numpy(map, origins, hits, map.res)
     return n
 
 
-def _raycast_numpy(map, origins, hits, res) -> None:
-    """纯 numpy 回退：沿每条射线等距采样，标记自由/占据。"""
-    for k in range(hits.shape[0]):
-        o = origins[k]
-        seg = hits[k] - o
-        length = float(np.linalg.norm(seg))
-        if length < 1e-6:
-            continue
-        n_steps = max(2, int(np.ceil(length / (res * 0.5))) + 1)
-        ts = np.linspace(0.0, 1.0, n_steps)
-        pts = o[None, :] + ts[:, None] * seg[None, :]
-        v = np.floor((pts - map.origin) / res).astype("int64")
+def dda_cells(start, end):
+    """Exact DDA, including endpoint; tie ordering matches the native kernel."""
+    cell = np.floor(start).astype(int)
+    last = np.floor(end).astype(int)
+    delta = end-start
+    step = np.where(delta > 0, 1, -1)
+    inv = np.divide(1., np.abs(delta), out=np.full(3, 1e30), where=np.abs(delta)>1e-12)
+    crossing = np.where(step > 0, np.floor(start)+1-start, start-np.floor(start))*inv
+    crossing[np.abs(delta)<=1e-12] = 1e30
+    yield tuple(cell)
+    for _ in range(int(np.abs(last-cell).sum())+3):
+        if np.array_equal(cell,last): break
+        x,y,z=crossing
+        a = (0 if x < z else 2) if x < y else (1 if y < z else 2)
+        cell[a] += step[a]; crossing[a] += inv[a]
+        yield tuple(cell)
 
-        # 去相邻重复体素
-        keep = np.ones(v.shape[0], dtype=bool)
-        keep[1:] = np.any(v[1:] != v[:-1], axis=1)
-        v = v[keep]
 
-        if v.shape[0] == 0:
-            continue
-        # 沿途（不含起点）→ 自由；终点 → 占据
-        for r in range(1, v.shape[0] - 1):
-            map.mark_free(int(v[r, 0]), int(v[r, 1]), int(v[r, 2]))
-        if v.shape[0] >= 2:
-            map.mark_occupied(int(v[-1, 0]), int(v[-1, 1]), int(v[-1, 2]))
+def _raycast_numpy(map, origins, hits, res):
+    free, occupied = set(), set()
+    for o,h in zip(origins,hits):
+        cells=list(dda_cells((o-map.origin)/res, (h-map.origin)/res))
+        if len(cells)<2: continue
+        free.update(c for c in cells[:-1] if map.in_bounds(*c))
+        if map.in_bounds(*cells[-1]): occupied.add(cells[-1])
+    for c in free: map.data[c]=1
+    for c in occupied: map.data[c]=2

@@ -135,7 +135,10 @@ class PersistentMap:
                 blk = np.full((self.block, self.block, self.block), UNKNOWN, dtype="int8")
                 self.blocks[key] = blk
             sel = inv == u
-            np.maximum.at(blk, (off[sel, 0], off[sel, 1], off[sel, 2]), states[sel])
+            batch = np.zeros_like(blk)
+            np.maximum.at(batch, (off[sel, 0], off[sel, 1], off[sel, 2]), states[sel])
+            touched = batch != UNKNOWN
+            blk[touched] = batch[touched]
         return int(known.shape[0])
 
     # ------------------------------------------------------------------

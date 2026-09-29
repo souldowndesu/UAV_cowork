@@ -431,14 +431,15 @@ class NavigationPipeline:
         """把精细占据图降采样到粗网格（occupied 优先），返回粗 OccupancyMap。"""
         ratio = plan_res / fine_res
         r = int(round(ratio))
-        if r < 1:
-            r = 1
+        if r < 1 or not np.isclose(ratio, r):
+            raise ValueError("plan_res must be an integer multiple of res")
         eff_res = r * fine_res
         fnx, fny, fnz = occ.shape
         cnx, cny, cnz = fnx // r, fny // r, fnz // r
         cropped = occ[:cnx * r, :cny * r, :cnz * r]
         blocks = cropped.reshape(cnx, r, cny, r, cnz, r)
-        coarse = blocks.max(axis=(1, 3, 5))  # OCCUPIED(2) 优先
+        coarse = np.where((blocks == 2).any(axis=(1,3,5)), 2,
+                          np.where((blocks == 1).all(axis=(1,3,5)), 1, 0)).astype("int8")  # OCCUPIED(2) 优先
         cm = OccupancyMap(cnx, cny, cnz, eff_res, tuple(origin))
         cm.data = coarse
         return cm
@@ -488,25 +489,12 @@ class NavigationPipeline:
             return state_pos
 
         data = occ_map.data
-        if data[si, sj, sk] == OCCUPIED:
-            # 无人机太贴墙、自身体素被膨胀占据：找最近的 FREE 体素当"可达种子"
-            # （优先净空 ≥ min_cl 的，退而求其次任意 FREE），引导它退回安全区。
-            free_idx = np.argwhere(data == FREE)
-            if free_idx.size == 0:
-                return state_pos
-            d2 = np.sum((free_idx - np.array([si, sj, sk])) ** 2, axis=1)
-            safe = free_idx[dist_field[free_idx[:, 0], free_idx[:, 1], free_idx[:, 2]] >= min_cl]
-            if safe.size:
-                n = safe[np.argmin(np.sum((safe - np.array([si, sj, sk])) ** 2, axis=1))]
-            else:
-                n = free_idx[np.argmin(d2)]
-            si, sj, sk = int(n[0]), int(n[1]), int(n[2])
+        if data[si, sj, sk] == OCCUPIED or dist_field[si,sj,sk] < d_min:
+            return np.asarray(state_pos).copy()
 
-        # 可达分量：严格对齐 A* 可通行语义 —— OCCUPIED 不可通行；FREE/UNKNOWN 需净空 ≥
-        # d_min（A* 对 d<d_min 硬截断为 INF）。UNKNOWN 可通行（cost=c_unknown）。
         traversable = (data != OCCUPIED) & (dist_field >= d_min)
         lbl, _ = ndimage.label(traversable)
-        reach = lbl == lbl[si, sj, sk]
+        reach = (lbl != 0) & (lbl == lbl[si, sj, sk])
 
         # 目标本身可达（FREE 或 UNKNOWN，非 OCCUPIED；reach 已含净空 ≥ d_min）→ 直接用。
         gi, gj, gk = int(gv[0]), int(gv[1]), int(gv[2])

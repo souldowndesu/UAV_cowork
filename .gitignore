@@ -24,3 +24,6 @@ cpp/build_extension.bat.bak
 .idea/
 Thumbs.db
 Desktop.ini
+
+.pytest_cache/
+*.egg-info/

@@ -15,12 +15,8 @@ from typing import List, Optional
 
 import numpy as np
 
-try:
-    from . import _fast  # type: ignore
-    USING_FAST = True
-except Exception:
-    _fast = None
-    USING_FAST = False
+from .backend import native as _fast
+USING_FAST = _fast is not None
 
 _NEIGHBORS = [(dx, dy, dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1)
               for dz in (-1, 0, 1) if not (dx == 0 and dy == 0 and dz == 0)]
@@ -87,10 +83,7 @@ class AStarPlanner:
         if not map.in_bounds(*start_v):
             return None
         if self._blocked(map, dist, start_v):
-            start_v = self._nearest_clear(map, dist, start_v)
-            if start_v is None:
-                return None
-            start = map.voxel_to_world(*start_v)
+            return None  # Never teleport the search start through an obstacle.
         if self._blocked(map, dist, goal_v):
             goal_v = self._nearest_clear(map, dist, goal_v)
             if goal_v is None:
@@ -148,6 +141,9 @@ class AStarPlanner:
                     continue
                 c = self._cost(occ, dist, ni, nj, nk)
                 if c >= INF:
+                    continue
+                from .geometry import edge_clear
+                if not edge_clear(occ, dist, (ci,cj,ck), (dx,dy,dz), self.d_min):
                     continue
                 step = c * elen * res
                 if is_start:
