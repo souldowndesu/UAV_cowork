@@ -22,6 +22,26 @@ from nav.recorder import Recorder
 from nav.web_server import VizServer
 
 
+def _sense_bbox(pipe, cfg):
+    """感知区（A* 计算域）bbox = 轨迹包围盒 + 局部图半宽膨胀（含前向偏置）。
+
+    持久图只存 FREE/OCCUPIED，未记录即 unknown；只有落在感知区内的 unknown 才有观察
+    意义（用户 m03748）。这里用轨迹包围盒向外扩局部图半宽近似感知区并集（x 向前向余量
+    更大，map_back_x）；回放端还可再手动裁剪（persistent_bbox）。
+    """
+    tl = pipe.telemetry()
+    if not tl:
+        return None
+    xs = [float(t["x"]) for t in tl]
+    ys = [float(t["y"]) for t in tl]
+    zs = [float(t["z"]) for t in tl]
+    ms = cfg.map_size
+    back_x = float(getattr(cfg, "map_back_x", ms[0] / 2.0))
+    return (min(xs) - back_x, max(xs) + (ms[0] - back_x),
+            min(ys) - ms[1] / 2.0, max(ys) + ms[1] / 2.0,
+            min(zs) - ms[2] / 2.0, max(zs) + ms[2] / 2.0)
+
+
 def run_mission(io, cfg, goal, on_tick=None,
                 recorder=None, viz_server=None,
                 stuck_timeout=30.0, stuck_dist=2.0,
@@ -63,6 +83,15 @@ def run_mission(io, cfg, goal, on_tick=None,
             if recorder is not None and autosave_path and \
                     time.time() - last_autosave_t >= autosave_interval:
                 try:
+                    # 每次自动落盘前刷新持久图快照：否则 persistent 只在 mission 完全
+                    # 结束（pipe.stop 后）才写入，进程被硬杀 / final save 中断时录制里
+                    # 就只剩空的 persistent（用户 m03891 问题1：replay 没显示所有
+                    # occupied）。周期刷新保证 autosave 的 recording 始终含最近快照。
+                    if getattr(pipe, "persistent", None) is not None:
+                        recorder.set_persistent(
+                            pipe.persistent.occupied_points(stride=2),
+                            unknown=None,
+                            bbox=_sense_bbox(pipe, cfg))
                     d = os.path.dirname(autosave_path)
                     if d:
                         os.makedirs(d, exist_ok=True)
@@ -93,6 +122,20 @@ def run_mission(io, cfg, goal, on_tick=None,
                     break
     finally:
         pipe.stop()
+
+    # 持久图出口胶水：终盘后把建模地图 occupied 快照写入录制（供回放显示），
+    # 提取逻辑全在 nav/persistent_map.py，这里只做薄胶水。
+    # unknown 不再从持久图全量导出（用户 m03748/m03794：只存 free/occupied，unknown 逐帧
+    # 录在 maps 帧里）；bbox 为感知区范围，供回放端默认裁剪。
+    if recorder is not None and getattr(pipe, "persistent", None) is not None:
+        try:
+            bbox = _sense_bbox(pipe, cfg)
+            recorder.set_persistent(
+                pipe.persistent.occupied_points(stride=2),
+                unknown=None,
+                bbox=bbox)
+        except Exception:
+            pass
 
     telemetry = pipe.telemetry()
     try:

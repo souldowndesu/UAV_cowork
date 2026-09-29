@@ -12,6 +12,7 @@ Mapping 每轮把 (map.data, origin, dist) 拷贝成不可变快照交给 Planni
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 import traceback
@@ -72,6 +73,30 @@ class NavigationPipeline:
         # 录制器（可选）：完整记录状态/点云/重规划，供浏览器实时观看与回放
         self.recorder = None
 
+        # 持久图（第二阶段）：SSD 稀疏块体素图先验（§4–§7/§16–§17/§59/§61）。
+        # load 文件不存在/损坏 → 空图（不抛），任务照常从零建图。
+        self.persistent = None
+        self._persistent_path = None
+        self._last_persist_save = 0.0
+        self._last_persist_integrate = 0.0
+        if bool(getattr(cfg, "use_persistent_map", False)):
+            from .persistent_map import PersistentMap
+            p_res = float(getattr(cfg, "persistent_res", 0.6))
+            p_path = getattr(cfg, "persistent_map_path", "maps/persistent_map.npz")
+            if not os.path.isabs(p_path):
+                # 相对路径统一锚定到 NavigationPhase1 目录（与运行 CWD 无关）
+                p_path = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), p_path)
+            self._persistent_path = p_path
+            self.persistent = PersistentMap.load(
+                p_path,
+                res=p_res,
+                block=int(getattr(cfg, "persistent_block", 16)),
+                origin=tuple(getattr(cfg, "persistent_origin", (0.0, 0.0, 0.0))))
+            # 坐标对齐校验：持久图边长必须是局部图边长的整数倍
+            self.persistent.validate_alignment(cfg.res)
+            print(f"[PersistentMap] 已加载先验：{self.persistent.stats()}", flush=True)
+
         self._threads = []
 
     # ------------------------------------------------------------------
@@ -95,6 +120,14 @@ class NavigationPipeline:
         self._stop.set()
         for t in self._threads:
             t.join(timeout=2.0)
+        # 终盘：把最后一张 raw 图写回持久图并落盘（保证完整建模，最多丢 5s）
+        if self.persistent is not None:
+            try:
+                self.persistent.merge_from_local(self.map.data, self.map.origin, self.map.res)
+                self.persistent.save(self._persistent_path)
+                print(f"[PersistentMap] 终盘完成：{self.persistent.stats()}", flush=True)
+            except Exception as e:
+                print(f"[PersistentMap] 终盘失败：{e}", flush=True)
 
     # ------------------------------------------------------------------
     # 线程体
@@ -134,7 +167,24 @@ class NavigationPipeline:
             with self._points_lock:
                 pts = self._points
             self.map.recenter(state.position)
+            # 先验加载：把持久图 FREE/OCCUPIED 填进刚滚入的 UNKNOWN 条带（§16/§17）。
+            # 只填 UNKNOWN、不改已感知区域；传感器随后覆盖先验（Sensor > Historical）。
+            if self.persistent is not None:
+                self.persistent.seed_local(self.map.data, self.map.origin, self.map.res)
             raycast.integrate(self.map, state.position, pts, cfg)
+            # 全向建图（§54）：把所有 max_range 内的点**未裁剪**地直接写进持久图，
+            # 不受局部 40×40×10 滚动窗口限制。否则窗外点（尤其高空/低空）被丢弃 →
+            # 爬升/下降后 seed_local 无数据回填 → 出现 unknown（用户 m03549）。
+            if self.persistent is not None:
+                now = time.time()
+                if now - self._last_persist_integrate >= cfg.persistent_integrate_interval:
+                    try:
+                        self.persistent.integrate_frame(
+                            state.position, pts, cfg.max_range,
+                            float(getattr(cfg, "self_echo_dist", 0.3)))
+                    except Exception as e:
+                        print(f"[PersistentMap] 全向建图失败：{e}", flush=True)
+                    self._last_persist_integrate = now
             # "无回波 = 自由"：把从载具出发、max_range 内、且未被遮挡的 Unknown 标为 Free
             #（保留障碍后方为 Unknown，消除天空/地面的代价不对称导致的向下绕路）。
             self.map.mark_visible_free(state.position, cfg.max_range)
@@ -157,21 +207,36 @@ class NavigationPipeline:
             # 录制：下采样后的碰撞层 occupied（供浏览器显示实际被规划避让的障碍）
             if self.recorder is not None:
                 self._record_map_snapshot(state.position, collision)
+            # 写回：周期性地把 raw 图的 FREE/OCCUPIED 合并进持久图（UNKNOWN 跳过，
+            # OCCUPIED 优先），再原子落盘（§59：实时线程不等待磁盘，仅低频触发）。
+            if self.persistent is not None:
+                now = time.time()
+                if now - self._last_persist_save >= cfg.persistent_save_interval:
+                    self.persistent.merge_from_local(self.map.data, self.map.origin, self.map.res)
+                    self.persistent.save(self._persistent_path)
+                    self._last_persist_save = now
             time.sleep(max(0.0, period - (time.time() - t0)))
 
     def _record_map_snapshot(self, center, collision, stride: int = 6):
-        """下采样碰撞图并录制 occupied 体素中心（世界系）。
+        """下采样碰撞图 occupied + raw 图 unknown，录制体素中心（世界系）。
 
-        只录碰撞层 occupied（真实命中 + 传感器脚印膨胀），不录 unknown——规划范围
-        （=局部体素图尺寸）由浏览器按 ``recorder.map_size`` 画感知框表示，超出即视为未知。
+        occ 录碰撞层（真实命中 + 传感器脚印膨胀，供显示实际被规划避让的障碍）；unk 录
+        raw 图里 mark_visible_free 后仍 UNKNOWN 的体素（= 感知区 / A* 计算域内未观测到的
+        区域，如遮挡后方）。unknown 逐帧录、降采样存储（计算仍用原密度），回放按帧显示
+        （用户 m03748/m03794：全量 unknown 太卡，unknown 只出现在感知区域）。
         """
-        from .occupancy import OCCUPIED
+        from .occupancy import OCCUPIED, UNKNOWN
         sub = collision.data[::stride, ::stride, ::stride]
         idx = np.argwhere(sub == OCCUPIED)
-        if idx.shape[0] == 0:
-            return
-        world = collision.origin + (idx.astype("float64") * stride + 0.5) * collision.res
-        self.recorder.record_map(time.time(), world)
+        occ_world = None
+        if idx.shape[0]:
+            occ_world = collision.origin + (idx.astype("float64") * stride + 0.5) * collision.res
+        raw_sub = self.map.data[::stride, ::stride, ::stride]
+        uidx = np.argwhere(raw_sub == UNKNOWN)
+        unk_world = None
+        if uidx.shape[0]:
+            unk_world = self.map.origin + (uidx.astype("float64") * stride + 0.5) * self.map.res
+        self.recorder.record_map(time.time(), occ_world, unk_world)
 
     def _planning_loop(self):
         cfg = self.cfg
@@ -184,6 +249,13 @@ class NavigationPipeline:
             if snap is None or self.goal is None:
                 time.sleep(period)
                 continue
+            # 确保 A* 基于最新采样：mapping 慢（~1.4s/帧）时 planning 会反复读同一个旧
+            # snapshot 规划多次，导致图滞后、规划偏移（用户 m03891 问题3）。此处仅当
+            # snapshot.ts 变化（mapping 发布了新图）才继续，否则跳过等待新采样。
+            if getattr(self, "_last_plan_snap_ts", None) == snap.ts:
+                time.sleep(period)
+                continue
+            self._last_plan_snap_ts = snap.ts
             # 降低决策频率：当前轨迹未执行满 replan_fraction 时跳过重规划，
             # 让已规划的轨迹真正被执行（避免每周期重置导致慢爬）。
             traj_now = self.coordinator.traj
@@ -199,19 +271,32 @@ class NavigationPipeline:
                 p_s, v_s, a_s = self._splice_state(snap, time.time())
             except Exception:
                 p_s, v_s, a_s = snap.state_pos, np.zeros(3), np.zeros(3)
-            goal = self._local_goal(snap.state_pos, self.goal, snap.origin,
-                                    cfg.res, cfg.nx, cfg.ny, cfg.nz)
             # 粗网格 A*（§7/§24 粗路径，plan_res 提速）
             coarse_map = self._coarsen(snap.occ, snap.origin, cfg.res, cfg.plan_res)
+            # 可规划范围 > 感知范围（用户 m04144/m04146）：外圈补一圈 UNKNOWN（代价高
+            # 但可达），让 goal 在 occupied 后方时仍能被投影、A* 朝它探索，而非"缺乏
+            # 目标"原地徘徊。不扩大建图范围，仅扩大规划范围。
+            pad_vox = int(round(float(getattr(cfg, "plan_pad", 0.0)) / coarse_map.res))
+            pad_z_vox = int(round(float(getattr(cfg, "plan_pad_z", 0.0)) / coarse_map.res))
+            if pad_vox > 0 or pad_z_vox > 0:
+                coarse_map = self._pad_unknown(coarse_map, pad_vox, pad_z_vox)
+            # 注意：pad 外扩圈保持 UNKNOWN，不回填持久图（用户 m04540 要求）。
+            # UNKNOWN 圈是「辅助路线规划手段」——允许 A* 朝感知范围外探索；即使它
+            # 覆盖持久图已建好的信息也没关系，无人机朝该方向探索时 raycast 会自然
+            # 感知真实障碍并更新规划。仅此处为特例，其余 unknown-不覆盖-occupied 逻辑保留。
             coarse_dist = distance_field.compute(coarse_map, cfg)
-            # 局部目标常落在 UNKNOWN（超出 30m 感知半径），会令 A* 展开爆炸→无路径；
-            # 回拉到 FREE 且净空 ≥ d_safe 后 A* 只在已感知空间内规划。
+            # 局部目标夹到（pad 后的）可规划范围边界，两端留一体素余量
+            goal = self._local_goal(snap.state_pos, self.goal, coarse_map.origin,
+                                    coarse_map.res, coarse_map.nx, coarse_map.ny, coarse_map.nz)
+            # 局部目标允许落在 UNKNOWN（可通行）：goal 在 occupied 后方时投影到可达的
+            # UNKNOWN 点，让 A* 有明确目标、朝 goal 方向主动探索（用户 m04146）。
             goal = self._project_goal_free(coarse_map, coarse_dist, snap.state_pos,
                                            goal, min_cl=float(cfg.d_safe),
                                            d_min=float(cfg.d_min))
             w_dir = float(getattr(cfg, "w_dir", 0.0))
+            v_dir = v_s
             path = self.planner.plan(coarse_map, coarse_dist, p_s, goal,
-                                     v_dir=v_s, w_dir=w_dir)
+                                     v_dir=v_dir, w_dir=w_dir)
             if path is None or len(path) < 2:
                 self._astar_fail += 1
                 if self._astar_fail % 25 == 1:
@@ -359,19 +444,41 @@ class NavigationPipeline:
         return cm
 
     @staticmethod
-    def _project_goal_free(occ_map, dist_field, state_pos, goal, min_cl=0.0, d_min=0.0):
-        """把局部目标投影到"可达 + FREE + 净空足够"的体素（receding-horizon）。
+    def _pad_unknown(occ_map, pad_xy_vox, pad_z_vox=0):
+        """把可规划范围外扩 UNKNOWN（可规划范围 > 感知范围，各向异性）。
 
-        仅当局部目标本身在无人机可达连通分量内时才直接返回它；否则在**可达
-        分量**里挑一个离全局目标最近的**前沿点**（FREE 且邻接未探索 UNKNOWN
-        或地图边），让 A* 绕开障碍向目标推进。
-
-        相比沿连线回拉更稳健：目标被建筑墙挡住时，连线回拉会停在墙面前
-        （目标=墙前一点，无人机已到 → 原地踏步），前沿投影则让 A* 从墙两侧
-        的街道绕过去继续前进。
-        ``min_cl`` 要求目标点距障碍 ≥ min_cl（默认 d_safe），避免贴边/翻边。
+        x/y 每边外扩 ``pad_xy_vox``、z 每边外扩 ``pad_z_vox`` 圈 UNKNOWN（cost=c_unknown
+        代价高但可达），让 goal 在 occupied 后方时仍能被投影到可达的 UNKNOWN、A* 朝它
+        探索（用户 m04144/m04146）。绕楼是水平绕行，z 通常不扩（减少体素/搜索前沿）。
+        只扩大规划范围、不扩大建图范围（建图仍只在原始 map_size 内）。
         """
-        from .occupancy import FREE, UNKNOWN, OCCUPIED
+        from .occupancy import UNKNOWN
+        d = occ_map.data
+        p = int(pad_xy_vox)
+        q = int(pad_z_vox)
+        padded = np.full((d.shape[0] + 2 * p, d.shape[1] + 2 * p, d.shape[2] + 2 * q),
+                         UNKNOWN, dtype=d.dtype)
+        padded[p:p + d.shape[0], p:p + d.shape[1], q:q + d.shape[2]] = d
+        origin = occ_map.origin - np.array([p, p, q], dtype="float64") * occ_map.res
+        cm = OccupancyMap(padded.shape[0], padded.shape[1], padded.shape[2],
+                          occ_map.res, tuple(origin))
+        cm.data = padded
+        return cm
+
+    @staticmethod
+    def _project_goal_free(occ_map, dist_field, state_pos, goal, min_cl=0.0, d_min=0.0):
+        """把局部目标投影到「可达 + 非 OCCUPIED（FREE 或 UNKNOWN）+ 净空足够」的体素。
+
+        仅当局部目标本身在无人机可达连通分量内（FREE 或 UNKNOWN，A* 可通行）时才直接
+        返回它；否则在可达分量里挑一个离全局目标最近的点，让 A* 朝目标方向推进。
+
+        关键（用户 m04146）：goal 可能在 occupied 后方，其位置是 UNKNOWN（LiDAR 被墙
+        遮挡感知不到）。旧实现要求目标 ``data == FREE``，把 UNKNOWN 排除在目标/候选
+        之外，导致 goal 在墙后时「缺乏目标」——只能选墙前 FREE 前沿点，A* 到墙前
+        原地徘徊。现在允许 UNKNOWN 作为目标（代价高但可达），A* 会朝 goal 方向穿过
+        UNKNOWN 主动探索、绕过障碍。
+        """
+        from .occupancy import FREE, OCCUPIED
         from scipy import ndimage
 
         sv = occ_map.world_to_voxel(state_pos)
@@ -395,35 +502,26 @@ class NavigationPipeline:
                 n = free_idx[np.argmin(d2)]
             si, sj, sk = int(n[0]), int(n[1]), int(n[2])
 
-        # 可达分量：严格对齐 A* 的可通行语义 —— OCCUPIED 不可通行；FREE 需净空 ≥ d_min
-        # （A* 对 d<d_min 的 FREE 硬截断为 INF）；UNKNOWN 可通行（cost=c_unknown）。
-        # 之前用 data!=OCCUPIED 会把「膨胀后净空 <d_min 的窄缝」也当可达，导致投影选到
-        # 墙后 A* 实际穿不过的点（本 bug 根因）。
+        # 可达分量：严格对齐 A* 可通行语义 —— OCCUPIED 不可通行；FREE/UNKNOWN 需净空 ≥
+        # d_min（A* 对 d<d_min 硬截断为 INF）。UNKNOWN 可通行（cost=c_unknown）。
         traversable = (data != OCCUPIED) & (dist_field >= d_min)
         lbl, _ = ndimage.label(traversable)
         reach = lbl == lbl[si, sj, sk]
 
-        # 目标本身可达 + FREE + 净空够 → 直接用
+        # 目标本身可达（FREE 或 UNKNOWN，非 OCCUPIED；reach 已含净空 ≥ d_min）→ 直接用。
         gi, gj, gk = int(gv[0]), int(gv[1]), int(gv[2])
-        if (occ_map.in_bounds(gi, gj, gk) and reach[gi, gj, gk]
-                and data[gi, gj, gk] == FREE
-                and float(dist_field[gi, gj, gk]) >= min_cl):
+        if occ_map.in_bounds(gi, gj, gk) and reach[gi, gj, gk]:
             return goal
 
-        # 候选 = 可达 + FREE + 净空够（净空不满足时放宽为可达 + FREE，避免卡死）
+        # 候选：优先可达 + FREE + 净空 ≥ min_cl（安全），否则退化为所有可达点（含 UNKNOWN）。
         cand = reach & (data == FREE) & (dist_field >= min_cl)
         if not cand.any():
-            cand = reach & (data == FREE)
+            cand = reach
         if not cand.any():
             return state_pos
 
-        # 前沿 = 候选中邻接 UNKNOWN 或地图边的体素（优先向未探索空间推进）
-        nb_unk = ndimage.maximum_filter(
-            (data == UNKNOWN).astype("uint8"), size=3, mode="constant", cval=1)
-        frontier = cand & (nb_unk > 0)
-        use = frontier if frontier.any() else cand
-
-        idx = np.argwhere(use)
+        # 选离 goal 最近的可达点（UNKNOWN 本身即可达，无需再要求"邻接前沿"）
+        idx = np.argwhere(cand)
         world = occ_map.origin + (idx + 0.5) * occ_map.res
         d2 = np.sum((world - np.asarray(goal, dtype="float64")) ** 2, axis=1)
         bi = int(np.argmin(d2))

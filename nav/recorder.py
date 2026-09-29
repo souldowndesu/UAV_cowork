@@ -84,6 +84,9 @@ class Recorder:
         self.points = []                 # {"t","pts"(N,3) float32}
         self.plans = []                  # {"t","goal","path","traj","ctrl"}
         self.maps = []                   # {"t","occ"(N,3)} 下采样碰撞图（仅 occupied）
+        self.persistent = None           # (N,3) 持久图 occupied 快照（任务结束时一次性写入）
+        self.persistent_unknown = None   # (N,3) 持久图 unknown 快照（灰色显示未观测区）
+        self.persistent_bbox = None      # [xmin,xmax,ymin,ymax,zmin,zmax] 感知区范围（回放默认裁剪）
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -125,16 +128,22 @@ class Recorder:
         with self._lock:
             self.points.append({"t": tt, "pts": arr})
 
-    def record_map(self, t, occ):
+    def record_map(self, t, occ, unk=None):
         arr = _mat_n3(occ, dtype="float32")
-        if arr.shape[0] == 0:
+        uarr = _mat_n3(unk, dtype="float32") if unk is not None else None
+        if arr.shape[0] == 0 and (uarr is None or uarr.shape[0] == 0):
             return
         try:
             tt = float(t) if t is not None else 0.0
         except Exception:
             return
         with self._lock:
-            self.maps.append({"t": tt, "occ": arr})
+            self.maps.append({
+                "t": tt,
+                "occ": arr,
+                "unk": (uarr if (uarr is not None and uarr.shape[0])
+                        else np.zeros((0, 3), dtype="float32")),
+            })
 
     def record_plan(self, t, goal, path, traj, ctrl):
         try:
@@ -149,6 +158,25 @@ class Recorder:
                 "traj": _mat_n3(traj),
                 "ctrl": _mat_n3(ctrl),
             })
+
+    def set_persistent(self, points, unknown=None, bbox=None):
+        """任务结束时写入持久图 occupied/unknown 快照（世界系 (N,3)），供回放显示建模地图。
+
+        ``bbox`` 为感知区范围 [xmin,xmax,ymin,ymax,zmin,zmax]（世界系 NED），回放端据此做
+        默认裁剪；``unknown`` 只应含感知区内的 unknown（用户 m03748），不导全量块内空白。
+        """
+        arr = _mat_n3(points, dtype="float32")
+        unk = _mat_n3(unknown, dtype="float32") if unknown is not None else None
+        bb = None
+        if bbox is not None:
+            try:
+                bb = [float(v) for v in bbox[:6]]
+            except Exception:
+                bb = None
+        with self._lock:
+            self.persistent = arr if arr.shape[0] else None
+            self.persistent_unknown = unk if (unk is not None and unk.shape[0]) else None
+            self.persistent_bbox = bb
 
     # ------------------------------------------------------------------
     # 最新快照（实时观看用）
@@ -187,9 +215,12 @@ class Recorder:
                     for p in self.plans
                 ],
                 "maps": [
-                    {"t": m["t"], "occ": _flat(m["occ"])}
+                    {"t": m["t"], "occ": _flat(m["occ"]), "unk": _flat(m.get("unk"))}
                     for m in self.maps
                 ],
+                "persistent": (_flat(self.persistent) if self.persistent is not None else []),
+                "persistent_unknown": (_flat(self.persistent_unknown) if self.persistent_unknown is not None else []),
+                "persistent_bbox": (list(self.persistent_bbox) if self.persistent_bbox is not None else None),
                 "map_size": (list(self.map_size) if self.map_size is not None else None),
             }
 
@@ -228,6 +259,9 @@ class Recorder:
                     for s in self.states
                 ],
                 "points": [], "plans": [], "maps": [],
+                "persistent": [],
+                "persistent_unknown": [],
+                "persistent_bbox": None,
                 "map_size": (list(self.map_size) if self.map_size is not None else None),
             }
 
@@ -244,6 +278,8 @@ class Recorder:
                 print(f"[Recorder] 最小录制也失败（{e2}），仅保存 goal")
                 data = {"goal": _l(self.goal) if self.goal is not None else None,
                         "states": [], "points": [], "plans": [], "maps": [],
+                        "persistent": [], "persistent_unknown": [],
+                        "persistent_bbox": None,
                         "map_size": (list(self.map_size) if self.map_size is not None else None)}
         tmp = path + ".tmp"
         try:

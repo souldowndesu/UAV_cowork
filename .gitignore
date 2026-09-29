@@ -2,8 +2,12 @@
 results/
 record/
 temp/
+maps/
 *.csv
 *.out
+
+# ---- 临时诊断脚本（scratch/，不入库）----
+scratch/
 
 # ---- Python 缓存 / 编译 ----
 __pycache__/

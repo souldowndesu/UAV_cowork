@@ -36,13 +36,20 @@ class Config:
     w_hard: float = 100.0                     # B-spline 硬净空 barrier 权重（净空 < d_min 时二次惩罚，优化内硬约束）
 
     # ---- A*（§24） ----
-    astar_timeout_nodes: int = 500000         # 展开节点上限（粗图 100×100×25=250k 体素，启发式低估~5× 时搜索前沿覆盖整图，须≥整图）
+    astar_timeout_nodes: int = 1500000        # 展开节点上限（粗图 pad 后 ~176×176×25=774k 体素，启发式低估时搜索前沿覆盖整图，须≥整图）
     h_weight: float = 1.0                     # 启发式权重。必须 ≤ c_free(=1.0) 才可采纳/一致；
                                               # 曾设 5.0 使 A* 贪心，中和了障碍距离惩罚（贴墙走最短路径），
                                               # 降到 1.0 让距离惩罚真正生效（避让更安全路径）。
     w_dir: float = 6.0                        # A* 起点速度方向引导权重（§24 补充）：起点节点邻居方向与
                                               # 当前速度夹角越大、边代价附加 w_dir*(1-cosθ)*res。让 A* 起步
                                               # 沿速度方向延伸而非垂直起步（消除大幅摆动/脱离路线）。
+    plan_pad: float = 15.0                    # 可规划范围 x/y 每边比感知范围多出的缓冲（米）。绕楼在水平面，
+                                              # x/y 外圈补 UNKNOWN（代价高但可达），让 goal 在 occupied 后方
+                                              # （UNKNOWN）时仍能被投影/A* 朝它探索，主动探索未知区而非"缺乏
+                                              # 目标"原地徘徊（用户 m04144/m04146）。不扩大建图范围。
+    plan_pad_z: float = 0.0                   # z 方向额外缓冲（米）。绕楼是水平绕行、不需要垂直探索，z 不扩
+                                              # 以减少粗图体素（避免各向同性 pad 让 nz 从 25 膨胀到 85、A* 搜索
+                                              # 前沿爆炸耗尽节点上限）。
 
     # ---- B-spline（§29–§35） ----
     bspline_order: int = 3                    # 三次
@@ -86,6 +93,15 @@ class Config:
     # ---- 起飞 / 降落 ----
     takeoff_altitude: float = 3.0             # 起飞后离地高度，米
     flight_altitude: float = 8.0              # 目标巡航高度（NED：发送时取负），米
+
+    # ---- 持久建图 Persistent Map（方案书 §4–§7/§16–§17/§59/§61） ----
+    use_persistent_map: bool = True           # 是否启用持久图先验加载与写回；False = 回到第一阶段行为
+    persistent_res: float = 0.6               # 持久图体素边长 r_G，米。必须是 res(0.2) 的整数倍（保证坐标对齐）
+    persistent_block: int = 16                # 稀疏块边长（体素数），§5
+    persistent_origin: tuple = (0.0, 0.0, 0.0)  # 单一世界锚点（NED），索引可为负
+    persistent_map_path: str = "maps/persistent_map.npz"  # 相对 NavigationPhase1 目录
+    persistent_save_interval: float = 5.0     # 落盘间隔（秒）；任务结束必落盘
+    persistent_integrate_interval: float = 1.0  # 全向建图周期（秒）：把整帧点云未裁剪地写进持久图（§54）
 
     # ---- 杂项 ----
     seed: int = 0

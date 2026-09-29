@@ -23,6 +23,11 @@ def compute(map, cfg) -> np.ndarray:
     """返回与 ``map.data`` 同形的 float32 截断距离场（米）。按 ``map.res`` 采样。"""
     occupied = map.data == 2  # OCCUPIED
     res = map.res
+    if not occupied.any():
+        # 无任何障碍时 distance_transform_edt(~occupied) 会对"全 foreground"返回到数组
+        # 边界的伪距离（把 (0,0,0) 角当唯一 background），导致边界附近 d<d_min 被 A*
+        # 误判为不可通行、且距离场在开阔地无意义。此时直接返回全 d_max（处处净空最大）。
+        return np.full(map.data.shape, cfg.d_max, dtype="float32")
     if USING_SCIPY:
         # distance_transform_edt：非零体素到最近零体素（=占据）的距离
         d = _ndi.distance_transform_edt(

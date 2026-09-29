@@ -75,9 +75,9 @@ class OccupancyMap:
         26 连通分量标记，载具体素所在分量即"从载具出发、不被障碍遮挡、可达的已知+未知
         空域"；把其中 ``max_range`` 内的 UNKNOWN 标 FREE。
 
-        OCCUPIED 阻断连通 → 障碍后方保持 UNKNOWN（消除"墙后幻影空隙→A* 穿墙"的 bug）。
-        相比旧实现（只沿 FREE 单层扩张），本实现把整片开放空域（天空/前方未探索）一次性
-        标 FREE，避免"头顶天空长期 UNKNOWN→A* 向下钻/前沿投影全挤在低空"的代价不对称。
+        OCCUPIED 阻断连通 → 障碍后方保持 UNKNOWN（A* 不会穿墙）。
+        滚动窗口清零产生的"UNKNOWN 洞"（即"遗忘障碍"）由 seed_local 在上游用持久图回填
+        OCCUPIED 消除，故此处 UNKNOWN 只会是真正的开放空域（天空/未探索前方），标 FREE 不会穿墙。
         """
         try:
             from scipy import ndimage as _ndi

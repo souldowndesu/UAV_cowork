@@ -55,7 +55,18 @@
       <span><span class="sw" style="background:#7ee787"></span>B-spline 轨迹</span>
       <span><span class="sw" style="background:#ff7b72"></span>目标</span>
       <span><span class="sw" style="background:#ff5050"></span>占据</span>
+      <span><span class="sw" style="background:#4dd0e1"></span>持久地图</span>
+      <span><span class="sw" style="background:#888"></span>未观测(unknown)</span>
       <span><span class="sw" style="background:#78beff"></span>规划/感知范围</span>
+    </span>
+    <span class="legend" title="地图显示范围（世界系 NED，留空=不限）" style="gap:4px;">
+      <span>范围</span>
+      <input id="bXmin" type="number" step="1" style="width:48px" title="X 最小(北)"><b>~</b><input id="bXmax" type="number" step="1" style="width:48px" title="X 最大(北)">
+      <input id="bYmin" type="number" step="1" style="width:48px" title="Y 最小(东)"><b>~</b><input id="bYmax" type="number" step="1" style="width:48px" title="Y 最大(东)">
+      <input id="bZmin" type="number" step="1" style="width:48px" title="Z 最小(下)"><b>~</b><input id="bZmax" type="number" step="1" style="width:48px" title="Z 最大(下)">
+      <button id="btnRangeApply" title="按输入范围裁剪地图">裁剪</button>
+      <button id="btnRangeAuto" title="自动=轨迹感知区">自动</button>
+      <button id="btnRangeReset" title="显示全部地图">全部</button>
     </span>
     <span id="status" style="color:var(--dim);font-size:11px;">连接中…</span>
   </div>
@@ -82,6 +93,11 @@ let states = [];      // {t, p:[x,y,z], v:[..], a:[..], yaw}
 let points = [];      // {t, pts:[x1,y1,z1,...]}
 let plans  = [];      // {t, goal, path:[[..]], traj:[[..]], ctrl:[[..]]}
 let maps   = [];      // {t, occ:[x1,y1,z1,...]}
+let persistent = [];  // [x1,y1,z1,...] 持久地图 occupied 快照（任务结束一次性建模结果，已按范围裁剪）
+let persistentUnknown = [];  // [x1,y1,z1,...] 持久地图 unknown 快照（灰色未观测区，free 不标记）
+let fullPersistent = [];       // 原始未裁剪 occupied（applyRecording 时缓存，供范围裁剪）
+let fullPersistentUnknown = []; // 原始未裁剪 unknown
+let rangeBbox = null;          // [xmin,xmax,ymin,ymax,zmin,zmax] 当前裁剪范围（null=不限）
 let goal   = null;
 let mapSize = [40, 40, 10]; // 米，规划范围(=局部体素图 x/y/z)，感知框尺寸（无录制信息时回退默认）
 let t0 = 0, tEnd = 0;
@@ -205,8 +221,14 @@ function render(){
   const mi=latestIdx(maps, curT);
   if(mi>=0){
     const mp=maps[mi];
+    // 感知区 unknown（灰，逐帧）：raw 图里 mark_visible_free 后仍未观测到的区域（遮挡后方等）
+    if(mp.unk && mp.unk.length) drawFlat(ctx,w,h, mp.unk, "rgba(136,136,136,0.35)", 2);
     if(mp.occ && mp.occ.length) drawFlat(ctx,w,h, mp.occ, "rgba(255,80,80,0.8)", 4);
   }
+  // 持久地图 unknown（灰色，兼容旧录制）：新版 unknown 已改为逐帧 maps.unk，这里通常为空
+  if(persistentUnknown && persistentUnknown.length) drawFlat(ctx,w,h, persistentUnknown, "rgba(136,136,136,0.35)", 2);
+  // 持久地图：任务结束时的建模结果（历史累积障碍，浅青），常驻显示
+  if(persistent && persistent.length) drawFlat(ctx,w,h, persistent, "rgba(77,208,225,0.45)", 3);
   // 无人机感知框（探测范围球）
   drawPerceptionFrame(ctx,w,h);
   // 点云
@@ -338,12 +360,62 @@ function applyRecording(r){
   goal=r.goal||null;
   if(r.map_size) mapSize=r.map_size;
   states=r.states||[]; points=r.points||[]; plans=r.plans||[]; maps=r.maps||[];
+  fullPersistent=r.persistent||[];
+  fullPersistentUnknown=r.persistent_unknown||[];
+  if(r.persistent_bbox && r.persistent_bbox.length===6) applyRange(r.persistent_bbox);
+  else resetRange();
   refreshRange(); curT=t0; setPlay(false);
   document.getElementById("btnReplay").classList.add("active");
   document.getElementById("btnLive").classList.remove("active");
   clearInterval(liveTimer); mode="replay";
   document.getElementById("status").textContent =
     `回放：${states.length} 帧 / ${points.length} 点云 / ${plans.length} 重规划`;
+}
+
+/* ============================ 地图范围裁剪 ============================ */
+function filterFlat(flat, bbox){
+  if(!bbox || bbox.length!==6) return flat;
+  const [xmin,xmax,ymin,ymax,zmin,zmax]=bbox;
+  const out=[];
+  for(let i=0;i+2<flat.length;i+=3){
+    const x=flat[i], y=flat[i+1], z=flat[i+2];
+    if(x>=xmin && x<=xmax && y>=ymin && y<=ymax && z>=zmin && z<=zmax) out.push(x,y,z);
+  }
+  return out;
+}
+function setRangeInputs(bbox){
+  const ids=["bXmin","bXmax","bYmin","bYmax","bZmin","bZmax"];
+  if(bbox && bbox.length===6){ bbox.forEach((v,i)=>{ document.getElementById(ids[i]).value=Math.round(v); }); }
+  else ids.forEach(id=>{ document.getElementById(id).value=""; });
+}
+function applyRange(bbox){
+  if(!bbox || bbox.length!==6) return;
+  rangeBbox=bbox;
+  persistent=filterFlat(fullPersistent, bbox);
+  persistentUnknown=filterFlat(fullPersistentUnknown, bbox);
+  setRangeInputs(bbox);
+  document.getElementById("status").textContent=
+    `范围裁剪：occupied ${persistent.length/3} / unknown ${persistentUnknown.length/3} 点`;
+}
+function resetRange(){
+  rangeBbox=null;
+  persistent=fullPersistent;
+  persistentUnknown=fullPersistentUnknown;
+  setRangeInputs(null);
+  document.getElementById("status").textContent=
+    `全量：occupied ${persistent.length/3} / unknown ${persistentUnknown.length/3} 点`;
+}
+function autoRange(){
+  if(!states.length){ resetRange(); return; }
+  let xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity,zmin=Infinity,zmax=-Infinity;
+  for(const s of states){ const p=s.p;
+    xmin=Math.min(xmin,p[0]); xmax=Math.max(xmax,p[0]);
+    ymin=Math.min(ymin,p[1]); ymax=Math.max(ymax,p[1]);
+    zmin=Math.min(zmin,p[2]); zmax=Math.max(zmax,p[2]);
+  }
+  applyRange([xmin-mapSize[0]/2, xmax+mapSize[0]/2,
+              ymin-mapSize[1]/2, ymax+mapSize[1]/2,
+              zmin-mapSize[2]/2, zmax+mapSize[2]/2]);
 }
 function appendLive(f){
   if(f.empty) return;
@@ -400,6 +472,15 @@ document.getElementById("selRec").onchange = e=>{ loadRecordingById(+e.target.va
 document.getElementById("btnPlay").onclick = ()=>{ setPlay(!playing); };
 document.getElementById("selSpeed").onchange = e=>{ speed=+e.target.value; };
 scrub.oninput = ()=>{ if(mode==="replay"){ scrubToTime(); setPlay(false); } };
+document.getElementById("btnRangeApply").onclick = ()=>{
+  const get=id=>{ const v=parseFloat(document.getElementById(id).value); return Number.isFinite(v)?v:null; };
+  const b=[get("bXmin"),get("bXmax"),get("bYmin"),get("bYmax"),get("bZmin"),get("bZmax")];
+  if(b.some(v=>v===null)){ document.getElementById("status").textContent="范围输入不完整（6 个都填，或点「自动」）"; return; }
+  if(b[0]>b[1]||b[2]>b[3]||b[4]>b[5]){ document.getElementById("status").textContent="范围最小须 ≤ 最大"; return; }
+  applyRange(b);
+};
+document.getElementById("btnRangeAuto").onclick = autoRange;
+document.getElementById("btnRangeReset").onclick = resetRange;
 
 bindCamera();
 
