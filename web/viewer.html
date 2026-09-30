@@ -37,6 +37,7 @@
 </style>
 </head>
 <body>
+<label style="display:block;padding:6px"><input id="overview" type="checkbox">最终历史总览（可能包含当前回放时刻之后的信息）</label>
 <div id="app">
   <div id="toolbar">
     <span class="title">导航三维回放 <span style="color:var(--dim);font-weight:400;">(v3-单视图)</span></span>
@@ -87,6 +88,9 @@
 </div>
 
 <script>
+let geometry=[],showOverview=false;
+document.getElementById("overview").onchange=e=>{showOverview=e.target.checked;};
+
 "use strict";
 /* ============================ 数据 ============================ */
 let states = [];      // {t, p:[x,y,z], v:[..], a:[..], yaw}
@@ -193,26 +197,21 @@ function drawFlat(ctx,w,h,flat,color,size){
 // 无人机感知/规划框：以当前无人机位置为中心、mapSize 为边长的线框长方体。
 // 该范围 = 局部体素图（A*/规划域）；超出此范围，即便被 LiDAR 探测到也不用于规划，等同未知。
 function drawPerceptionFrame(ctx,w,h){
-  const st = lerpState(curT);
-  if(!st || !mapSize) return;
-  const [sx,sy,sz] = mapSize;
-  const hx = sx/2, hy = sy/2, hz = sz/2;
-  const c = st.p;  // 世界 NED [x北,y东,z下]
-  ctx.strokeStyle = "rgba(120,190,255,0.6)";
-  ctx.lineWidth = 1;
-  const seg=(A,B)=>{
-    const a=camProject(w2d(A),w,h), b=camProject(w2d(B),w,h);
-    if(a && b){ ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]); ctx.stroke(); }
-  };
-  // x 向 4 条棱
-  for(const syy of [-hy,hy]) for(const szz of [-hz,hz])
-    seg([c[0]-hx, c[1]+syy, c[2]+szz], [c[0]+hx, c[1]+syy, c[2]+szz]);
-  // y 向 4 条棱
-  for(const sxx of [-hx,hx]) for(const szz of [-hz,hz])
-    seg([c[0]+sxx, c[1]-hy, c[2]+szz], [c[0]+sxx, c[1]+hy, c[2]+szz]);
-  // z 向 4 条棱
-  for(const sxx of [-hx,hx]) for(const syy of [-hy,hy])
-    seg([c[0]+sxx, c[1]+syy, c[2]-hz], [c[0]+sxx, c[1]+syy, c[2]+hz]);
+  const idx=latestIdx(geometry,curT); if(idx<0) return;
+  const g=geometry[idx];
+  function box(pad,color){
+    const lo=g.origin.map((v,i)=>v-(i<2?pad:0));
+    const hi=g.origin.map((v,i)=>v+g.shape[i]*g.res+(i<2?pad:0));
+    ctx.strokeStyle=color; ctx.lineWidth=1;
+    for(let axis=0;axis<3;axis++) for(let u=0;u<2;u++) for(let v=0;v<2;v++){
+      const a=lo.slice(),b=lo.slice(),others=[0,1,2].filter(i=>i!==axis);
+      a[others[0]]=b[others[0]]=u?hi[others[0]]:lo[others[0]];
+      a[others[1]]=b[others[1]]=v?hi[others[1]]:lo[others[1]]; b[axis]=hi[axis];
+      const x=camProject(w2d(a),w,h),y=camProject(w2d(b),w,h);
+      if(x&&y){ctx.beginPath();ctx.moveTo(...x);ctx.lineTo(...y);ctx.stroke();}
+    }
+  }
+  box(0,'rgba(120,190,255,.6)'); box(g.plan_pad||0,'rgba(255,166,87,.4)');
 }
 
 function render(){
@@ -226,9 +225,9 @@ function render(){
     if(mp.occ && mp.occ.length) drawFlat(ctx,w,h, mp.occ, "rgba(255,80,80,0.8)", 4);
   }
   // 持久地图 unknown（灰色，兼容旧录制）：新版 unknown 已改为逐帧 maps.unk，这里通常为空
-  if(persistentUnknown && persistentUnknown.length) drawFlat(ctx,w,h, persistentUnknown, "rgba(136,136,136,0.35)", 2);
+  if(showOverview && persistentUnknown && persistentUnknown.length) drawFlat(ctx,w,h, persistentUnknown, "rgba(136,136,136,0.35)", 2);
   // 持久地图：任务结束时的建模结果（历史累积障碍，浅青），常驻显示
-  if(persistent && persistent.length) drawFlat(ctx,w,h, persistent, "rgba(77,208,225,0.45)", 3);
+  if(showOverview && persistent && persistent.length) drawFlat(ctx,w,h, persistent, "rgba(77,208,225,0.45)", 3);
   // 无人机感知框（探测范围球）
   drawPerceptionFrame(ctx,w,h);
   // 点云
@@ -294,6 +293,18 @@ function setPlay(on){
 
 /* ============================ 实时 / 回放 ============================ */
 let libraryMode = false;
+let replayGeneration = 0;
+async function fetchJSON(url){
+  const response=await fetch(url);
+  const data=await response.json();
+  if(!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+function beginReplay(){
+  mode='replay'; ++liveGeneration;
+  clearTimeout(liveTimer); liveTimer=null;
+  return ++replayGeneration;
+}
 async function loadStatus(){
   try{
     const r=await fetch("/api/status").then(x=>x.json());
@@ -303,17 +314,18 @@ async function loadStatus(){
     else if(r.replay) s += `  单段回放`;
     document.getElementById("status").textContent = s;
     if(r.live) startLive();
-    if(r.library) await refreshRecordings();
+    if(r.library) await refreshRecordings(!r.live);
     else if(r.replay) await loadSingleReplay();
   }catch(e){
     document.getElementById("status").textContent = "无法连接服务器："+e.message;
     console.error(e);
   }
 }
-async function refreshRecordings(){
+async function refreshRecordings(load=true){
   try{
-    const list=await fetch("/api/recordings").then(x=>x.json());
+    const list=await fetchJSON("/api/recordings");
     const sel=document.getElementById("selRec");
+    const selected=sel.value;
     sel.innerHTML="";
     if(!list.length){
       const o=document.createElement("option"); o.value=""; o.textContent="无录制";
@@ -324,33 +336,40 @@ async function refreshRecordings(){
     list.forEach((m,i)=>{
       const dur=(m.t1!=null&&m.t0!=null)?(m.t1-m.t0).toFixed(1)+"s":"?";
       const g=m.goal? m.goal.map(x=>Math.round(x)).join(","):"?";
-      const o=document.createElement("option"); o.value=i;
-      o.textContent=`${m.name}  目标[${g}] ${dur}  ${m.n_states}帧`;
+      const o=document.createElement("option"); o.value=m.id || String(i);
+      o.disabled=!!m.error;
+      o.textContent=m.error?`${m.name}  读取失败`:`${m.name}  目标[${g}] ${dur}  ${m.n_states}帧${m.complete===false?'  未完整结束':''}`;
       sel.appendChild(o);
     });
-    sel.value="0";
+    const usable=list.filter(m=>!m.error);
+    if(!usable.length){document.getElementById("status").textContent="录制元信息均无法读取"; return;}
+    sel.value=usable.some(m=>m.id===selected)?selected:(usable[0].id || String(list.indexOf(usable[0])));
     document.getElementById("status").textContent=`已列出 ${list.length} 条录制，加载中…`;
-    await loadRecordingById(0);
+    if(load) await loadRecordingById(sel.value);
   }catch(e){
     document.getElementById("status").textContent="加载录制列表失败："+e.message;
     console.error(e);
   }
 }
 async function loadRecordingById(i){
+  const generation=beginReplay();
   document.getElementById("status").textContent=`加载录制 #${i} 中…`;
   try{
-    const r=await fetch("/api/recording?id="+i).then(x=>x.json());
-    applyRecording(r);
+    const r=await fetchJSON("/api/recording?id="+encodeURIComponent(i));
+    if(generation===replayGeneration && mode==='replay')applyRecording(r);
   }catch(e){
+    if(generation!==replayGeneration || mode!=='replay')return;
     document.getElementById("status").textContent="加载录制失败："+e.message;
     console.error(e);
   }
 }
 async function loadSingleReplay(){
+  const generation=beginReplay();
   try{
-    const r=await fetch("/api/recording").then(x=>x.json());
-    applyRecording(r);
+    const r=await fetchJSON("/api/recording");
+    if(generation===replayGeneration && mode==='replay')applyRecording(r);
   }catch(e){
+    if(generation!==replayGeneration || mode!=='replay')return;
     document.getElementById("status").textContent="加载录制失败："+e.message;
     console.error(e);
   }
@@ -359,7 +378,8 @@ function applyRecording(r){
   if(r.empty){ document.getElementById("status").textContent="无录制数据"; return; }
   goal=r.goal||null;
   if(r.map_size) mapSize=r.map_size;
-  states=r.states||[]; points=r.points||[]; plans=r.plans||[]; maps=r.maps||[];
+  geometry=r.geometry||[]; states=r.states||[]; points=r.points||[]; plans=r.plans||[]; maps=r.maps||[];
+  for(const stream of [geometry,states,points,plans,maps])stream.sort((a,b)=>a.t-b.t || (a.seq||0)-(b.seq||0));
   fullPersistent=r.persistent||[];
   fullPersistentUnknown=r.persistent_unknown||[];
   if(r.persistent_bbox && r.persistent_bbox.length===6) applyRange(r.persistent_bbox);
@@ -367,9 +387,9 @@ function applyRecording(r){
   refreshRange(); curT=t0; setPlay(false);
   document.getElementById("btnReplay").classList.add("active");
   document.getElementById("btnLive").classList.remove("active");
-  clearInterval(liveTimer); mode="replay";
+  clearTimeout(liveTimer); liveTimer=null; mode="replay";
   document.getElementById("status").textContent =
-    `回放：${states.length} 帧 / ${points.length} 点云 / ${plans.length} 重规划`;
+    `回放：${states.length} 帧 / ${points.length} 点云 / ${plans.length} 重规划${r.complete===false?' / 录制未完整结束':''}`;
 }
 
 /* ============================ 地图范围裁剪 ============================ */
@@ -417,27 +437,35 @@ function autoRange(){
               ymin-mapSize[1]/2, ymax+mapSize[1]/2,
               zmin-mapSize[2]/2, zmax+mapSize[2]/2]);
 }
+let liveSeen={},liveGeneration=0;
 function appendLive(f){
   if(f.empty) return;
-  if(f.goal) goal=f.goal;
-  if(f.map_size) mapSize=f.map_size;
-  if(f.state){ states.push({t:f.state.t,p:f.state.p,v:f.state.v,a:f.state.a,yaw:f.state.yaw}); }
-  if(f.pts && f.pts.length) points.push({t:f.state.t, pts:f.pts});
-  if(f.plan){ plans.push({t:f.plan.t, goal:f.plan.goal, path:f.plan.path, traj:f.plan.traj, ctrl:f.plan.ctrl}); }
-  refreshRange();
-  if(mode==="live" && !playing) curT=tEnd;
+  if(f.goal) goal=f.goal; if(f.map_size) mapSize=f.map_size;
+  for(const [key,list,value] of [['state',states,f.state],['point',points,f.point],['plan',plans,f.plan],['map',maps,f.map],['geometry',geometry,f.geometry]]){
+    if(!value) continue; const id=value.seq??value.t;
+    if(liveSeen[key]===id) continue; liveSeen[key]=id;
+    list.push(value); if(list.length>2000) list.splice(0,list.length-2000);
+  }
+  refreshRange(); if(mode==='live'&&!playing)curT=tEnd;
 }
 function startLive(){
-  mode="live";
-  document.getElementById("btnLive").classList.add("active");
-  document.getElementById("btnReplay").classList.remove("active");
-  clearInterval(liveTimer);
-  liveTimer=setInterval(async ()=>{
-    try{ const f=await fetch("/api/live").then(x=>x.json()); appendLive(f); }catch(e){}
-  }, 150);
+  ++replayGeneration;
+  mode='live'; const generation=++liveGeneration; liveSeen={};
+  states=[]; points=[]; plans=[]; maps=[]; geometry=[];
+  fullPersistent=[]; fullPersistentUnknown=[]; persistent=[]; persistentUnknown=[];
+  goal=null; rangeBbox=null; setRangeInputs(null); setPlay(false);
+  document.getElementById('btnLive').classList.add('active');
+  document.getElementById('btnReplay').classList.remove('active');
+  clearTimeout(liveTimer);
+  async function poll(){
+    try { const f=await fetch('/api/live').then(r=>r.json()); if(mode==='live'&&generation===liveGeneration)appendLive(f); } catch(e){}
+    if(mode==='live'&&generation===liveGeneration)liveTimer=setTimeout(poll,150);
+    else if(generation===liveGeneration)liveTimer=null;
+  }
+  poll();
 }
 
-/* ============================ 相机交互 ============================ */
+/* ============================ 相机交互/* ============================ 相机交互 ============================ */
 function bindCamera(){
   const cv=document.getElementById("cv");
   let drag=null, lx=0, ly=0;
@@ -465,10 +493,10 @@ function bindCamera(){
 }
 
 /* ============================ 交互 ============================ */
-document.getElementById("btnLive").onclick = ()=>{ mode="live"; if(!liveTimer) startLive(); else document.getElementById("btnLive").classList.add("active"), document.getElementById("btnReplay").classList.remove("active"); };
+document.getElementById("btnLive").onclick = startLive;
 document.getElementById("btnReplay").onclick = ()=>{ if(libraryMode) refreshRecordings(); else loadSingleReplay(); };
 document.getElementById("btnRefresh").onclick = refreshRecordings;
-document.getElementById("selRec").onchange = e=>{ loadRecordingById(+e.target.value); };
+document.getElementById("selRec").onchange = e=>{ loadRecordingById(e.target.value); };
 document.getElementById("btnPlay").onclick = ()=>{ setPlay(!playing); };
 document.getElementById("selSpeed").onchange = e=>{ speed=+e.target.value; };
 scrub.oninput = ()=>{ if(mode==="replay"){ scrubToTime(); setPlay(false); } };

@@ -4,7 +4,7 @@
 覆盖三类：
 1. 正常 roundtrip：record → save → reload，字段完整、结构正确。
 2. 防御式输入：None / 参差列表 / 错误形状 / NaN/Inf，record_* 一律不抛异常。
-3. save 永不失败：即使内部数据被破坏，save() 也返回路径并产出合法 JSON（无 NaN 字面量）。
+3. 保存失败明确报错，保留此前已提交的数据，不伪造成功结果。
 """
 import json
 import os
@@ -15,6 +15,7 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
+import pytest
 
 from nav.recorder import Recorder
 
@@ -90,18 +91,17 @@ def test_nan_cleaned_to_valid_json():
         assert data["points"][0]["pts"][0] == 0.0
 
 
-def test_save_never_fails_on_corrupted_data():
+def test_save_reports_corruption_and_preserves_previous_file():
     rec = Recorder()
     rec.record_state(0.0, [0, 0, 0], [1, 1, 1], [0, 0, 0])
-    # 人为破坏内部数据：塞一个坏 state（p 是 None），完整序列化也应被回退兜住
-    with rec._lock:
-        rec.states.append({"t": 0.1, "p": None, "v": None, "a": None, "yaw": 0.0})
     with tempfile.TemporaryDirectory() as d:
         p = os.path.join(d, "recording.json")
-        out = rec.save(p)
-        assert out is not None
-        data = json.load(open(p, encoding="utf-8"))
-        assert "states" in data
+        rec.save(p)
+        with open(p, 'rb') as f: before = f.read()
+        with rec._lock:
+            rec.states.append({'t': 0.1, 'p': object()})
+        with pytest.raises(TypeError): rec.save(p)
+        with open(p, 'rb') as f: assert f.read() == before
 
 
 def test_concurrent_recording_no_corruption():
@@ -134,6 +134,6 @@ if __name__ == "__main__":
     test_roundtrip_basic()
     test_record_never_raises_adversarial()
     test_nan_cleaned_to_valid_json()
-    test_save_never_fails_on_corrupted_data()
+    test_save_reports_corruption_and_preserves_previous_file()
     test_concurrent_recording_no_corruption()
     print("test_recorder: OK")

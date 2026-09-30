@@ -1,436 +1,294 @@
-# -*- coding: utf-8 -*-
-"""录制器：把一次任务完整记录下来（载具状态 / LiDAR 点云 / 每次重规划），
-供浏览器三维四视图实时观看，或事后拖动进度条回放。线程安全。
-
-设计原则（保证录制/保存永不因其它模块改动而失效，用户以回放作为评判标准）：
-- 所有 ``record_*`` 都是防御式：任意形状/类型/None/NaN 的输入都被安全地规整成
-  ``(3,)`` 或 ``(N,3)``，绝不抛异常 → 录制线程不会因为数据形状变化而死亡。
-- 序列化用向量化清洗 NaN/Inf，产出合法 JSON（不会出现 NaN/Infinity 非法字面量）。
-- ``save()`` 永不失败：完整序列化失败 → 回退最小录制 → 回退仅 goal；原子写入失败
-  → 回退直接写。每一步失败都打印原因，且保存成功后打印帧数摘要供用户自检。
-"""
-from __future__ import annotations
-
+"""Versioned append-only recording with bounded live buffers and atomic commits."""
+import gzip
+import copy
+import hashlib
 import json
 import os
+import queue
 import threading
-
+import time
+from collections import deque,OrderedDict
+from pathlib import Path
 import numpy as np
 
+STREAMS=('states','points','plans','maps')
 
-# ---------------------------------------------------------------------------
-# 安全规整辅助（永不抛异常）
-# ---------------------------------------------------------------------------
-def _vec3(a, dtype="float64"):
-    """任意输入 → (3,) float 数组；失败/缺失 → zeros(3)。"""
+def _timestamp(value):
     try:
-        arr = np.asarray(a, dtype=dtype).reshape(-1)
-    except Exception:
-        return np.zeros(3, dtype=dtype)
-    out = np.zeros(3, dtype=dtype)
-    n = min(3, arr.shape[0])
-    out[:n] = arr[:n]
-    return out
+        value = float(value)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return value if np.isfinite(value) else None
 
-
-def _mat_n3(a, dtype="float64"):
-    """任意输入 → (N,3) float 数组；失败/空/非 3 倍数 → (0,3)。"""
+def _array(value):
     try:
-        arr = np.asarray(a, dtype=dtype)
-        flat = arr.reshape(-1)
-    except Exception:
-        return np.zeros((0, 3), dtype=dtype)
-    n = flat.shape[0] // 3
-    if n == 0:
-        return np.zeros((0, 3), dtype=dtype)
-    return flat[: n * 3].reshape(n, 3)
+        a=np.asarray(value,dtype=float).reshape(-1)
+        a=np.nan_to_num(a,nan=0.,posinf=0.,neginf=0.)
+        return a[:len(a)//3*3].reshape(-1,3).copy()
+    except (ValueError,TypeError): return np.empty((0,3))
 
+def _vec(value):
+    a=_array(value)
+    return a[0].copy() if len(a) else np.zeros(3)
 
-def _clean_round(a, nd, dtype="float64"):
-    """向量化清洗 NaN/Inf → 0.0 并 round 到 nd 位，返回 1-D Python list。"""
-    try:
-        arr = np.asarray(a, dtype=dtype).reshape(-1)
-    except Exception:
-        return []
-    arr = np.where(np.isfinite(arr), arr, 0.0)
-    return np.round(arr, nd).tolist()
+def _jsonable(value):
+    if isinstance(value,np.ndarray): return np.round(value,5).tolist()
+    if isinstance(value,np.generic): return value.item()
+    if isinstance(value,dict): return {k:_jsonable(v) for k,v in value.items()}
+    if isinstance(value,(list,tuple,deque)): return [_jsonable(v) for v in value]
+    return value
 
+def atomic_json(path,data):
+    path=Path(path); path.parent.mkdir(parents=True,exist_ok=True)
+    tmp=path.with_name(path.name+'.tmp')
+    with tmp.open('w',encoding='utf-8') as f:
+        json.dump(data,f,ensure_ascii=False,allow_nan=False,separators=(',',':')); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp,path)
 
-def _l(v, nd=3):
-    """(3,) 向量 → [x,y,z]。"""
-    return _clean_round(v, nd)
-
-
-def _l2(a, nd=2):
-    """(N,3) 数组 → [[x,y,z],...]。"""
-    arr = _mat_n3(a)
-    arr = np.where(np.isfinite(arr), arr, 0.0)
-    return np.round(arr, nd).tolist()
-
-
-def _flat(a, nd=2):
-    """(N,3) 点云 → 一维 [x1,y1,z1,x2,...]，压缩体积。"""
-    return _clean_round(a, nd)
-
+def _meta(data):
+    st=data.get('states',[])
+    return dict(goal=data.get('goal'),t0=st[0]['t'] if st else None,t1=st[-1]['t'] if st else None,
+                **{'n_'+k:len(data.get(k,[])) for k in STREAMS})
 
 class Recorder:
-    def __init__(self, max_points: int = 1500, map_size=None):
-        self.max_points = int(max_points)
-        # 规划范围 = 局部体素图尺寸 (x,y,z) 米；浏览器据此画感知框（超出即未知、不用于规划）
-        self.map_size = (tuple(float(v) for v in map_size)
-                         if map_size is not None else None)
-        self.goal = None                 # (3,) 世界系
-        self.states = []                 # {"t","p","v","a","yaw"}
-        self.points = []                 # {"t","pts"(N,3) float32}
-        self.plans = []                  # {"t","goal","path","traj","ctrl"}
-        self.maps = []                   # {"t","occ"(N,3)} 下采样碰撞图（仅 occupied）
-        self.persistent = None           # (N,3) 持久图 occupied 快照（任务结束时一次性写入）
-        self.persistent_unknown = None   # (N,3) 持久图 unknown 快照（灰色显示未观测区）
-        self.persistent_bbox = None      # [xmin,xmax,ymin,ymax,zmin,zmax] 感知区范围（回放默认裁剪）
-        self._lock = threading.Lock()
-
-    # ------------------------------------------------------------------
-    # 录制（全部防御式，永不抛异常）
-    # ------------------------------------------------------------------
-    def set_goal(self, goal):
+    def __init__(self,max_points=1500,map_size=None):
+        self.max_points=max_points; self.map_size=map_size; self.goal=None
+        # Save-only callers retain full history; bounded buffers require a writer.
+        for name in STREAMS: setattr(self,name,deque())
+        self.events=deque(maxlen=512); self.persistent=[]; self.persistent_unknown=[]; self.persistent_bbox=None
+        self._lock=threading.RLock(); self._seq=0; self._queue=queue.Queue(maxsize=2048)
+        self._thread=None; self._path=None; self.error=None; self.closed=False; self._manifest=None
+    def start(self,path,cfg=None):
+        self._check()
+        if self.closed: raise RuntimeError('recording closed')
+        if self._thread: return
+        if self._seq: raise RuntimeError('start must precede recorded events; use save for legacy history')
+        self._path=Path(path).parent/'manifest.json'; self._path.parent.mkdir(parents=True,exist_ok=True)
+        if self._path.exists(): raise FileExistsError('Do not overwrite an existing recording')
+        from .backend import BUILD_HASH,native
+        self._manifest={'schema_version':2,'recording_id':self._path.parent.name,'chunks':[],'complete':False,
+            'goal':_jsonable(self.goal),'map_size':self.map_size,'config':cfg,'kernel_hash':BUILD_HASH,'native':native is not None,
+            'counts':{k:0 for k in STREAMS},'t0':None,'t1':None}
+        atomic_json(self._path,self._manifest)
+        for name in STREAMS: setattr(self,name,deque(maxlen=512))
+        self._thread=threading.Thread(target=self._writer,name='record-writer',daemon=True); self._thread.start()
+    def _check(self):
+        if self.error: raise RuntimeError('Recording writer failed; previous manifest retained') from self.error
+    def _append(self,kind,body):
+        body = copy.deepcopy(body)
         with self._lock:
-            self.goal = _vec3(goal)
-
-    def record_state(self, t, pos, vel, acc, yaw=0.0):
-        try:
-            tt = float(t) if t is not None else 0.0
-            y = float(yaw) if yaw is not None else 0.0
-            if not np.isfinite(y):
-                y = 0.0
-        except Exception:
-            return
+            self._check()
+            if self.closed: raise RuntimeError('recording closed')
+            self._seq+=1; body=dict(body,seq=self._seq)
+            (getattr(self,kind) if kind in STREAMS else self.events).append(body)
+            if self._thread:
+                try: self._queue.put_nowait({'kind':kind,'data':body})
+                except queue.Full as e: self.error=e; raise RuntimeError('recording queue overflow') from e
+    def set_goal(self,goal): self.goal=_vec(goal)
+    def record_state(self,t,pos,vel,acc,yaw=0.):
+        try: t=float(t); yaw=float(yaw)
+        except (ValueError,TypeError): return
+        if not np.isfinite(t): return
+        self._append('states',dict(t=t,p=_vec(pos),v=_vec(vel),a=_vec(acc),yaw=yaw if np.isfinite(yaw) else 0.))
+    def record_points(self,t,pts):
+        t = _timestamp(t)
+        if t is None: return
+        a=_array(pts)
+        if len(a)>self.max_points: a=a[np.linspace(0,len(a)-1,self.max_points,dtype=int)]
+        self._append('points',dict(t=t,pts=a.ravel()))
+    def record_map(self,t,occ,unk=None):
+        t = _timestamp(t)
+        if t is None: return
+        self._append('maps',dict(t=t,occ=_array(occ).ravel(),unk=_array(unk).ravel()))
+    def record_plan(self,t,goal,path,traj,ctrl):
+        t = _timestamp(t)
+        if t is None: return
+        self._append('plans',dict(t=t,goal=_vec(goal),path=_array(path),traj=_array(traj),ctrl=_array(ctrl)))
+    def record_event(self,kind,data): self._append(kind,data)
+    def set_persistent(self,points,unknown=None,bbox=None):
         with self._lock:
-            self.states.append({
-                "t": tt,
-                "p": _vec3(pos),
-                "v": _vec3(vel),
-                "a": _vec3(acc),
-                "yaw": y,
-            })
-
-    def record_points(self, t, pts):
-        arr = _mat_n3(pts, dtype="float32")
-        if arr.shape[0] == 0:
-            return
-        try:
-            n = arr.shape[0]
-            if n > self.max_points:
-                step = max(1, n // self.max_points)
-                arr = arr[::step][:self.max_points]
-            tt = float(t) if t is not None else 0.0
-        except Exception:
-            return
-        with self._lock:
-            self.points.append({"t": tt, "pts": arr})
-
-    def record_map(self, t, occ, unk=None):
-        arr = _mat_n3(occ, dtype="float32")
-        uarr = _mat_n3(unk, dtype="float32") if unk is not None else None
-        if arr.shape[0] == 0 and (uarr is None or uarr.shape[0] == 0):
-            return
-        try:
-            tt = float(t) if t is not None else 0.0
-        except Exception:
-            return
-        with self._lock:
-            self.maps.append({
-                "t": tt,
-                "occ": arr,
-                "unk": (uarr if (uarr is not None and uarr.shape[0])
-                        else np.zeros((0, 3), dtype="float32")),
-            })
-
-    def record_plan(self, t, goal, path, traj, ctrl):
-        try:
-            tt = float(t) if t is not None else 0.0
-        except Exception:
-            tt = 0.0
-        with self._lock:
-            self.plans.append({
-                "t": tt,
-                "goal": _vec3(goal),
-                "path": _mat_n3(path),
-                "traj": _mat_n3(traj),
-                "ctrl": _mat_n3(ctrl),
-            })
-
-    def set_persistent(self, points, unknown=None, bbox=None):
-        """任务结束时写入持久图 occupied/unknown 快照（世界系 (N,3)），供回放显示建模地图。
-
-        ``bbox`` 为感知区范围 [xmin,xmax,ymin,ymax,zmin,zmax]（世界系 NED），回放端据此做
-        默认裁剪；``unknown`` 只应含感知区内的 unknown（用户 m03748），不导全量块内空白。
-        """
-        arr = _mat_n3(points, dtype="float32")
-        unk = _mat_n3(unknown, dtype="float32") if unknown is not None else None
-        bb = None
-        if bbox is not None:
-            try:
-                bb = [float(v) for v in bbox[:6]]
-            except Exception:
-                bb = None
-        with self._lock:
-            self.persistent = arr if arr.shape[0] else None
-            self.persistent_unknown = unk if (unk is not None and unk.shape[0]) else None
-            self.persistent_bbox = bb
-
-    # ------------------------------------------------------------------
-    # 最新快照（实时观看用）
-    # ------------------------------------------------------------------
+            self.persistent=_array(points).ravel(); self.persistent_unknown=_array(unknown).ravel(); self.persistent_bbox=bbox
     def latest_state(self):
-        with self._lock:
-            return self.states[-1] if self.states else None
-
+        with self._lock: return self.states[-1] if self.states else None
     def latest_points(self):
-        with self._lock:
-            return self.points[-1] if self.points else None
-
+        with self._lock: return self.points[-1] if self.points else None
     def latest_plan(self):
-        with self._lock:
-            return self.plans[-1] if self.plans else None
-
-    # ------------------------------------------------------------------
-    # 序列化（给浏览器 JSON）
-    # ------------------------------------------------------------------
+        with self._lock: return self.plans[-1] if self.plans else None
     def to_dict(self):
         with self._lock:
-            return {
-                "goal": _l(self.goal) if self.goal is not None else None,
-                "states": [
-                    {"t": s["t"], "p": _l(s["p"]), "v": _l(s["v"]),
-                     "a": _l(s["a"]), "yaw": s["yaw"]}
-                    for s in self.states
-                ],
-                "points": [
-                    {"t": p["t"], "pts": _flat(p["pts"])} for p in self.points
-                ],
-                "plans": [
-                    {"t": p["t"], "goal": _l(p["goal"]),
-                     "path": _l2(p["path"]), "traj": _l2(p["traj"]),
-                     "ctrl": _l2(p["ctrl"])}
-                    for p in self.plans
-                ],
-                "maps": [
-                    {"t": m["t"], "occ": _flat(m["occ"]), "unk": _flat(m.get("unk"))}
-                    for m in self.maps
-                ],
-                "persistent": (_flat(self.persistent) if self.persistent is not None else []),
-                "persistent_unknown": (_flat(self.persistent_unknown) if self.persistent_unknown is not None else []),
-                "persistent_bbox": (list(self.persistent_bbox) if self.persistent_bbox is not None else None),
-                "map_size": (list(self.map_size) if self.map_size is not None else None),
-            }
-
+            data={k:list(getattr(self,k)) for k in STREAMS}
+            data.update(goal=self.goal,map_size=self.map_size,persistent=self.persistent,
+                        persistent_unknown=self.persistent_unknown,persistent_bbox=self.persistent_bbox)
+        return _jsonable(data)
     def meta(self):
-        """轻量元信息（目标/时长/帧数），供回放列表展示，避免每次都加载整段录制。"""
+        if self._manifest:
+            m=self._manifest
+            return dict(goal=m['goal'],t0=m['t0'],t1=m['t1'],complete=m['complete'],**{'n_'+k:m['counts'][k] for k in STREAMS})
+        return _meta(self.to_dict())
+    def summary(self): return {k:v for k,v in self.meta().items() if k.startswith('n_')}
+    def snapshot_live(self):
         with self._lock:
-            st = self.states
-            return {
-                "goal": _l(self.goal) if self.goal is not None else None,
-                "t0": st[0]["t"] if st else None,
-                "t1": st[-1]["t"] if st else None,
-                "n_states": len(st),
-                "n_points": len(self.points),
-                "n_plans": len(self.plans),
-                "n_maps": len(self.maps),
-            }
-
-    def summary(self):
-        """帧数摘要（保存后打印，供用户确认录制完整）。"""
+            latest={k:(getattr(self,k)[-1] if getattr(self,k) else None) for k in STREAMS}
+            geometry=next((e for e in reversed(self.events) if 'shape' in e and 'origin' in e),None)
+        st=latest['states']; pt=latest['points']
+        return _jsonable(dict(empty=st is None,goal=self.goal,map_size=self.map_size,state=st,
+            point=pt,pts=pt['pts'] if pt else [],plan=latest['plans'],map=latest['maps'],geometry=geometry))
+    def _writer(self):
+        batch=[]; last=time.monotonic(); map_previous=None; map_count=0
+        try:
+            while True:
+                try: item=self._queue.get(timeout=.25)
+                except queue.Empty: item='timer'
+                finish=item is None
+                flush=isinstance(item,threading.Event)
+                if isinstance(item,dict): batch.append(item)
+                if batch and (finish or flush or len(batch)>=256 or time.monotonic()-last>=1.):
+                    # Map keyframes every ten snapshots; deltas include removals.
+                    serialized=[]
+                    for event in batch:
+                        event=_jsonable(event)
+                        if event['kind']=='maps':
+                            body=event['data']; current={k:set(map(tuple,np.asarray(body[k]).reshape(-1,3))) for k in ('occ','unk')}
+                            if map_previous is not None and map_count%10:
+                                event={'kind':'map_delta','data':dict(t=body['t'],seq=body['seq'],
+                                    **{k+'_add':[list(v) for v in sorted(current[k]-map_previous[k])] for k in current},
+                                    **{k+'_remove':[list(v) for v in sorted(map_previous[k]-current[k])] for k in current})}
+                            map_previous=current; map_count+=1
+                        serialized.append(event)
+                    raw=json.dumps(serialized,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode('utf-8')
+                    name=f'chunk_{len(self._manifest["chunks"]):06d}.json.gz'; target=self._path.parent/name
+                    tmp=target.with_suffix('.tmp'); payload=gzip.compress(raw,compresslevel=1)
+                    with tmp.open('wb') as f: f.write(payload); f.flush(); os.fsync(f.fileno())
+                    os.replace(tmp,target)
+                    # Build the next manifest separately; publish only after the atomic commit.
+                    m=json.loads(json.dumps(self._manifest)); m['chunks'].append(dict(file=name,sha256=hashlib.sha256(payload).hexdigest(),events=len(batch)))
+                    for event in batch:
+                        kind=event['kind']; body=event['data']
+                        if kind in STREAMS: m['counts'][kind]+=1
+                        if kind=='states':
+                            m['t0']=body['t'] if m['t0'] is None else m['t0']; m['t1']=body['t']
+                    atomic_json(self._path,m); self._manifest=m; batch=[]; last=time.monotonic()
+                if flush: item.set()
+                if finish:
+                    m=dict(self._manifest,complete=not bool(self.error),error=str(self.error) if self.error else None)
+                    atomic_json(self._path,m); self._manifest=m; return
+        except BaseException as e: self.error=e
+    def flush(self):
         with self._lock:
-            return {
-                "n_states": len(self.states),
-                "n_points": len(self.points),
-                "n_plans": len(self.plans),
-                "n_maps": len(self.maps),
-            }
-
-    def _minimal_dict(self):
-        """最小录制（仅 states + goal），用于完整序列化失败时的回退，保证总能有文件。"""
+            self._check()
+            if not self._thread or self.closed: return
+            event=threading.Event(); self._queue.put(event,timeout=2)
+        deadline = time.monotonic() + 10
+        while not event.wait(.05):
+            self._check()
+            if not self._thread.is_alive(): raise RuntimeError('recording writer stopped before flush')
+            if time.monotonic() >= deadline: raise TimeoutError('recording flush timeout')
+        self._check()
+    def close(self):
         with self._lock:
-            return {
-                "goal": _l(self.goal) if self.goal is not None else None,
-                "states": [
-                    {"t": s["t"], "p": _l(s["p"]), "v": _l(s["v"]),
-                     "a": _l(s["a"]), "yaw": s["yaw"]}
-                    for s in self.states
-                ],
-                "points": [], "plans": [], "maps": [],
-                "persistent": [],
-                "persistent_unknown": [],
-                "persistent_bbox": None,
-                "map_size": (list(self.map_size) if self.map_size is not None else None),
-            }
-
-    def save(self, path):
-        # 永不失败：完整序列化 → 最小录制 → 仅 goal；原子写入 → 直接写。
-        # 每一步失败都打印原因，便于定位；保存成功后打印帧数摘要。
-        try:
-            data = self.to_dict()
-        except Exception as e:
-            print(f"[Recorder] 完整序列化失败（{e}），回退到最小录制（仅 states）")
-            try:
-                data = self._minimal_dict()
-            except Exception as e2:
-                print(f"[Recorder] 最小录制也失败（{e2}），仅保存 goal")
-                data = {"goal": _l(self.goal) if self.goal is not None else None,
-                        "states": [], "points": [], "plans": [], "maps": [],
-                        "persistent": [], "persistent_unknown": [],
-                        "persistent_bbox": None,
-                        "map_size": (list(self.map_size) if self.map_size is not None else None)}
-        tmp = path + ".tmp"
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False)
-            os.replace(tmp, path)
-        except Exception as e:
-            print(f"[Recorder] 原子写入失败（{e}），尝试直接写入 {path}")
-            try:
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False)
-            except Exception as e2:
-                print(f"[Recorder] 直接写入也失败（{e2}）")
-                return None
-        # 侧车 meta.json：回放列表无需加载整段录制即可展示信息（失败不影响主录制）
-        mp = os.path.join(os.path.dirname(path), "meta.json")
-        try:
-            m = self.meta()
-            m["name"] = os.path.basename(os.path.dirname(path))
-            m["recording"] = os.path.basename(path)
-            with open(mp, "w", encoding="utf-8") as f:
-                json.dump(m, f, ensure_ascii=False)
-        except Exception as e:
-            print(f"[Recorder] meta.json 写入失败（{e}），主录制已保存")
-        try:
-            s = self.summary()
-            print(f"[Recorder] 已保存 {path}：states={s['n_states']} points={s['n_points']} "
-                  f"plans={s['n_plans']} maps={s['n_maps']}")
-        except Exception:
-            pass
+            if self.closed:
+                self._check()
+                return
+            self.closed=True
+            # Closing and accepting events share a lock: nothing may be queued
+            # after the end marker, even when a producer races with shutdown.
+            if self._thread and self._thread.is_alive(): self._queue.put(None,timeout=2)
+        if self._thread:
+            self._thread.join(10); self._check()
+            if self._thread.is_alive(): raise TimeoutError('record writer shutdown')
+    def save(self,path):
+        if self._thread:
+            if not self.closed: self.flush()
+            self._check(); return str(self._path)
+        data=self.to_dict()
+        # No fallback is allowed to replace a previously complete recording.
+        atomic_json(path,data)
+        atomic_json(Path(path).parent/'meta.json',dict(_meta(data),name=Path(path).parent.name,recording=Path(path).name))
         return path
 
-    def snapshot_live(self):
-        """实时帧（浏览器 /api/live 用），返回 dict 或 None。"""
-        st = self.latest_state()
-        if st is None:
-            return None
-        pt = self.latest_points()
-        pl = self.latest_plan()
-        return {
-            "goal": _l(self.goal) if self.goal is not None else None,
-            "state": {"t": st["t"], "p": _l(st["p"]), "v": _l(st["v"]),
-                      "a": _l(st["a"]), "yaw": st["yaw"]},
-            "pts": _flat(pt["pts"]) if pt is not None else [],
-            "plan": ({"t": pl["t"], "goal": _l(pl["goal"]),
-                      "path": _l2(pl["path"]), "traj": _l2(pl["traj"]),
-                      "ctrl": _l2(pl["ctrl"])}
-                     if pl is not None else None),
-            "map_size": (list(self.map_size) if self.map_size is not None else None),
-        }
-
-
 def load_recording_dict(path):
-    """加载已保存的录制文件，返回纯 dict（供回放服务器直接服务）。"""
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    path=Path(path)
+    with path.open(encoding='utf-8') as f: meta=json.load(f)
+    if 'schema_version' not in meta: return meta
+    if meta['schema_version'] != 2: raise ValueError('unsupported recording schema version')
+    data={k:[] for k in STREAMS}; data.update(goal=meta.get('goal'),map_size=meta.get('map_size'),persistent=[],persistent_unknown=[],persistent_bbox=None,complete=meta['complete'],error=meta.get('error'),geometry=[],outcomes=[])
+    current=None; last_seq=0; chunk_names=set()
+    for chunk in meta['chunks']:
+        name=chunk['file']
+        if not isinstance(name,str) or not name.startswith('chunk_') or not name.endswith('.json.gz') or '/' in name or '\\' in name or ':' in name or Path(name).name!=name: raise ValueError('invalid chunk path')
+        if name in chunk_names: raise ValueError('duplicate chunk')
+        chunk_names.add(name)
+        payload=(path.parent/name).read_bytes()
+        if hashlib.sha256(payload).hexdigest()!=chunk['sha256']: raise ValueError('chunk checksum mismatch')
+        events = json.loads(gzip.decompress(payload))
+        if not isinstance(events,list) or len(events)!=chunk['events']: raise ValueError('chunk event count mismatch')
+        for event in events:
+            kind=event['kind']; body=event['data']
+            seq=body.get('seq')
+            if type(seq) is not int or seq <= last_seq: raise ValueError('event sequence is not increasing')
+            last_seq=seq
+            if kind=='maps':
+                current={k:set(map(tuple,np.asarray(body[k]).reshape(-1,3))) for k in ('occ','unk')}
+            elif kind=='map_delta':
+                if current is None: raise ValueError('delta without keyframe')
+                for k in current:
+                    current[k].difference_update(map(tuple,body[k+'_remove'])); current[k].update(map(tuple,body[k+'_add']))
+                body=dict(t=body['t'],seq=body['seq'],**{k:np.asarray(sorted(v)).ravel().tolist() for k,v in current.items()}); kind='maps'
+            if kind in STREAMS: data[kind].append(body)
+            elif kind=='map_geometry': data['geometry'].append(body)
+            elif kind=='outcome': data['outcomes'].append(body)
+    for k in STREAMS:
+        if len(data[k])!=meta['counts'][k]: raise ValueError('manifest count mismatch')
+    return data
 
-
-# ---------------------------------------------------------------------------
-# 录制库：自动扫描 / 元信息 / 按 id 加载
-# ---------------------------------------------------------------------------
 def scan_recordings(root_dir):
-    """递归扫描目录树里所有 recording.json，按修改时间降序返回路径列表。
+    root=Path(root_dir)
+    if not root.exists(): return []
+    manifests=list(root.rglob('manifest.json'))
+    legacy=[p for p in root.rglob('recording.json') if not (p.parent/'manifest.json').exists()]
+    return [str(p) for p in sorted(manifests+legacy,key=lambda p:p.stat().st_mtime_ns,reverse=True)]
 
-    兼容两层目录结构：
-    - 旧格式 ``results/<时间戳>/recording.json``
-    - 新批量格式 ``results/<时间戳>/run_NN/recording.json``
-    """
-    out = []
-    root = os.path.abspath(root_dir)
-    if not os.path.isdir(root):
-        return out
-    for dirpath, _dirnames, filenames in os.walk(root):
-        if "recording.json" in filenames:
-            rp = os.path.join(dirpath, "recording.json")
-            try:
-                out.append((rp, os.path.getmtime(rp)))
-            except OSError:
-                continue
-    out.sort(key=lambda x: -x[1])
-    return [p for p, _ in out]
-
-
-def read_meta(recording_path, root_dir=None):
-    """返回一条录制的元信息。优先读 meta.json 侧车；否则加载录制文件提取。
-
-    ``root_dir`` 非空时，``name`` 用相对该目录的路径（如 ``20260926_161726/run_00``），
-    避免批量测试里多个 ``run_00`` 重名；不传则退回目录名。
-    """
-    def _relname(p):
-        if root_dir:
-            try:
-                rel = os.path.relpath(os.path.dirname(os.path.abspath(p)),
-                                      os.path.abspath(root_dir))
-                if rel not in (".", os.curdir):
-                    return rel
-            except ValueError:
-                pass
-        return os.path.basename(os.path.dirname(p))
-
-    d = os.path.dirname(recording_path)
-    mp = os.path.join(d, "meta.json")
-    if os.path.isfile(mp):
-        try:
-            with open(mp, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-            meta["path"] = recording_path
-            meta["bytes"] = os.path.getsize(recording_path)
-            meta["name"] = _relname(recording_path)
-            return meta
-        except Exception:
-            pass
-    data = load_recording_dict(recording_path)
-    st = data.get("states", [])
-    return {
-        "name": _relname(recording_path),
-        "path": recording_path,
-        "bytes": os.path.getsize(recording_path),
-        "goal": data.get("goal"),
-        "t0": st[0]["t"] if st else None,
-        "t1": st[-1]["t"] if st else None,
-        "n_states": len(st),
-        "n_points": len(data.get("points", [])),
-        "n_plans": len(data.get("plans", [])),
-    }
-
+def read_meta(path,root_dir=None):
+    p=Path(path)
+    if p.name=='manifest.json':
+        m=json.loads(p.read_text(encoding='utf-8'))
+        meta=dict(goal=m['goal'],t0=m['t0'],t1=m['t1'],complete=m['complete'],**{'n_'+k:m['counts'][k] for k in STREAMS})
+    else: meta=_meta(load_recording_dict(p))
+    meta.update(name=os.path.relpath(p.parent,root_dir) if root_dir else p.parent.name,path=str(p),bytes=p.stat().st_size)
+    return meta
 
 class RecordingLibrary:
-    """一组录制：扫描 / 列表 / 按序号加载（带缓存）。"""
-
-    def __init__(self, root_dir):
-        self.root_dir = root_dir
-        self._paths = []
-        self._cache = {}
-        self._lock = threading.Lock()
-
+    def __init__(self,root_dir):
+        self.root_dir=root_dir; self._paths=[]; self._cache=OrderedDict(); self._lock=threading.RLock(); self.cache_bytes=128*1024*1024
     def scan(self):
-        self._paths = scan_recordings(self.root_dir)
+        with self._lock: self._paths=scan_recordings(self.root_dir)
         return self.list()
-
     def list(self):
-        return [read_meta(p, self.root_dir) for p in self._paths]
-
-    def count(self):
-        return len(self._paths)
-
-    def get(self, index):
-        if not (0 <= index < len(self._paths)):
-            return None
-        p = self._paths[index]
         with self._lock:
-            if p not in self._cache:
-                self._cache[p] = load_recording_dict(p)
-            return self._cache[p]
+            self._paths=scan_recordings(self.root_dir)
+            entries = []
+            for p in self._paths:
+                try: entry = read_meta(p,self.root_dir)
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    entry = dict(path=p, name=os.path.relpath(Path(p).parent,self.root_dir), error=str(exc))
+                entry['id'] = hashlib.sha256(os.path.relpath(p,self.root_dir).encode()).hexdigest()[:16]
+                entries.append(entry)
+            return entries
+    def count(self): return len(self.list())
+    def get(self,index):
+        with self._lock:
+            if isinstance(index,int):
+                if not 0<=index<len(self._paths): return None
+                p=self._paths[index]
+            else:
+                p=next((m['path'] for m in self.list() if m['id']==index),None)
+                if p is None: return None
+            st=Path(p).stat(); key=(p,st.st_mtime_ns,st.st_size)
+            if key not in self._cache:
+                value=load_recording_dict(p); size=len(json.dumps(value))
+                for old in list(self._cache):
+                    if old[0]==p: del self._cache[old]
+                while self._cache and sum(v[1] for v in self._cache.values())+size>self.cache_bytes: self._cache.popitem(last=False)
+                if size<=self.cache_bytes: self._cache[key]=(value,size)
+                return value
+            self._cache.move_to_end(key); return self._cache[key][0]

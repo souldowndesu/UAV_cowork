@@ -43,6 +43,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        try:
+            self._get()
+        except (OSError, ValueError, KeyError, TypeError, EOFError) as exc:
+            self._send(422, {"error": "无法读取录制：" + str(exc)})
+
+    def _get(self):
         parsed = urlparse(self.path)
         path = parsed.path
         qs = parse_qs(parsed.query)
@@ -83,7 +89,8 @@ class _Handler(BaseHTTPRequestHandler):
             if srv.library is not None:
                 raw = qs.get("id", [None])[0]
                 try:
-                    idx = int(raw) if raw is not None else None
+                    # A 16-character stable hash may consist entirely of digits.
+                    idx = int(raw) if raw is not None and raw.isdigit() and len(raw)<16 else raw
                 except (TypeError, ValueError):
                     idx = None
                 data = srv.library.get(idx) if idx is not None else None
@@ -120,8 +127,9 @@ class VizServer:
     def start(self):
         if self._httpd is not None:
             return
-        _Handler.server_ref = self
-        self._httpd = ThreadingHTTPServer(("127.0.0.1", self.port), _Handler)
+        handler=type("BoundHandler",(_Handler,),{"server_ref":self})
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", self.port), handler)
+        self.port = self._httpd.server_address[1]
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         self._thread.start()
 

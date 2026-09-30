@@ -20,6 +20,7 @@ def main(argv=None):
     parser.add_argument("--results-dir", default=None,
                         help="录制目录（默认：脚本所在目录下的 results/，与运行位置无关）")
     parser.add_argument("--port", type=int, default=8765, help="服务端口")
+    parser.add_argument("--serve",action="store_true",help="持续服务，不依赖 stdin")
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
     # 默认锚定到脚本所在目录，避免从其它目录运行时 results 解析错
@@ -32,6 +33,9 @@ def main(argv=None):
     metas = lib.scan()
     print(f"[Replay] 目录 {os.path.abspath(results_dir)} 下找到 {len(metas)} 条录制：")
     for i, m in enumerate(metas):
+        if m.get('error'):
+            print(f"  [{i}] {m['name']}  读取失败：{m['error']}")
+            continue
         dur = (m.get("t1") - m.get("t0")) if (m.get("t1") is not None and m.get("t0") is not None) else None
         goal = m.get("goal")
         goal_s = ",".join(f"{g:.0f}" for g in goal) if goal else "?"
@@ -46,7 +50,10 @@ def main(argv=None):
     srv.start()
     print(f"[Replay] 服务地址 {srv.url}（页面里下拉选择录制；Ctrl+C 退出）")
     try:
-        input()
+        if args.serve:
+            import time
+            while True: time.sleep(.5)
+        else: input()
     except (EOFError, KeyboardInterrupt):
         pass
     srv.stop()
