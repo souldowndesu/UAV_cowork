@@ -320,11 +320,12 @@ class PersistentMap:
     # ------------------------------------------------------------------
     # 持久化（§59：实时线程不等待磁盘 → 调用方在 mapping 线程低频触发）
     # ------------------------------------------------------------------
-    def save(self, path) -> None:
+    def save(self, path, *, strict=False) -> bool:
         """原子落盘 npz（只存含 FREE/OCCUPIED 的块，unknown 不落盘）+ meta 侧车。
 
         永不抛异常（失败打印原因），不阻断任务；tmp+replace 保证进程被杀不损坏旧图。
         """
+        path=os.fspath(path)
         try:
             d = os.path.dirname(path)
             if d:
@@ -341,16 +342,20 @@ class PersistentMap:
             meta = self.stats()
             with open(mp, "w", encoding="utf-8") as f:
                 json.dump(meta, f, ensure_ascii=False)
+            return True
         except Exception as e:
+            if strict:raise
             print(f"[PersistentMap] 保存失败：{e}")
+            return False
 
     @classmethod
     def load(cls, path, res: float = 0.6, block: int = 16,
-             origin=(0.0, 0.0, 0.0)) -> "PersistentMap":
+             origin=(0.0, 0.0, 0.0), *, strict=False) -> "PersistentMap":
         """加载持久图；文件不存在/损坏 → 返回空图（不抛异常）。
 
         优先用 meta 侧车里的 res/block/origin（保证同一文件自洽往返），缺失时回退到入参。
         """
+        path=os.fspath(path)
         meta = {}
         mp = path + ".meta.json"
         if os.path.isfile(mp):
@@ -384,6 +389,7 @@ class PersistentMap:
                         pm.blocks[(bx, by, bz)] = arr
                 data.close()
             except Exception as e:
+                if strict:raise
                 print(f"[PersistentMap] 加载 {path} 失败（{e}），从空图开始")
                 pm.blocks.clear()
                 pm.approaches.clear()

@@ -55,7 +55,7 @@
     <button id="btnRefresh" title="重新扫描">↻</button>
     <button id="btnPlay">▶ 播放</button>
     <label style="font-size:12px;"><input id="simEnabled" type="checkbox" disabled>模拟器场景</label>
-    <select id="simView" aria-label="场景相机" disabled><option value="follow">跟随无人机</option><option value="top">俯视</option><option value="overview">整条路线</option></select>
+    <select id="simView" aria-label="场景相机" disabled><option value="follow">跟随无人机</option><option value="top">俯视</option><option value="pair_top">双机俯视</option><option value="overview">整条路线</option></select>
     <button id="btnSimReset" disabled title="恢复当前预设视角；也可双击画面">重置视角</button>
     <span id="simStatus" style="color:var(--dim);font-size:11px;"></span>
     <select id="selSpeed">
@@ -64,6 +64,7 @@
     </select>
     <span class="legend">
       <span><span class="sw" style="background:#58a6ff"></span>实际轨迹</span>
+      <span><span class="sw" style="background:#f5d442"></span>黑飞目标轨迹</span>
       <span><span class="sw" style="background:#ffa657"></span>A* 路径</span>
       <span><span class="sw" style="background:#7ee787"></span>B-spline 轨迹</span>
       <span><span class="sw" style="background:#ff7b72"></span>目标</span>
@@ -92,6 +93,8 @@
     <span>加速度 <b id="hAcc">-</b></span>
     <span class="dim">目标距离</span> <b id="hGoalDist">-</b>
     <span class="dim">接近点距离</span> <b id="hApproachDist">-</b>
+    <span class="dim">目标速度</span> <b id="hTargetSpeed">-</b>
+    <span class="dim">预测提前量</span> <b id="hTargetLead">-</b>
   </div>
   <div id="stage">
     <canvas id="cv"></canvas>
@@ -113,6 +116,7 @@ document.getElementById("overview").onchange=e=>{showOverview=e.target.checked;}
 "use strict";
 /* ============================ 数据 ============================ */
 let states = [];      // {t, p:[x,y,z], v:[..], a:[..], yaw}
+let targets = [];     // 实际黑飞状态；预测只作为诊断字段
 let points = [];      // {t, pts:[x1,y1,z1,...]}
 let plans  = [];      // {t, goal, path:[[..]], traj:[[..]], ctrl:[[..]]}
 let maps   = [];      // {t, occ:[x1,y1,z1,...]}
@@ -173,6 +177,12 @@ function latestIdx(arr, t){
   return ans;
 }
 function trailUpTo(t){ const out=[]; for(const s of states){ if(s.t<=t) out.push(s.p); } return out; }
+function targetAt(t){
+  const index=latestIdx(targets,t);if(index<0)return null;
+  const a=targets[index],b=targets[Math.min(index+1,targets.length-1)];
+  const f=b.t>a.t?Math.max(0,Math.min(1,(t-a.t)/(b.t-a.t))):0;
+  return {...a,p:a.p.map((x,i)=>x+(b.p[i]-x)*f),v:a.v.map((x,i)=>x+(b.v[i]-x)*f)};
+}
 
 /* ============================ 绘制（单视图） ============================ */
 function clearCv(){
@@ -255,6 +265,8 @@ function render(){
   if(si>=0) drawPoints(ctx,w,h, points[si].pts);
   // 实际轨迹
   polyline(ctx,w,h, trailUpTo(curT), "#58a6ff", 2);
+  const black=targetAt(curT);
+  if(black){polyline(ctx,w,h,targets.filter(s=>s.t<=curT).map(s=>s.p).concat([black.p]),'#f5d442',2.5);drawGoal(ctx,w,h,black.p,'#f5d442');}
   // A* 路径 + B-spline
   const pi=latestIdx(plans, curT);
   if(pi>=0){
@@ -264,7 +276,7 @@ function render(){
     if(pl.ctrl.length){ ctx.fillStyle="#7ee787"; for(const c of pl.ctrl){
       const s=camProject(w2d(c),w,h); if(s) ctx.fillRect(s[0]-2.5,s[1]-2.5,5,5); } }
   }
-  if(goal) drawGoal(ctx,w,h, goal);
+  if(goal && !black) drawGoal(ctx,w,h, goal);
   // 无人机当前位置
   const st=lerpState(curT); if(st){
     if(st.approach_goal) drawGoal(ctx,w,h,st.approach_goal,"#79c0ff");
@@ -278,6 +290,9 @@ function updateHUD(){
   const st=lerpState(curT);
   const fmt=(a)=> a? a.map(x=>x.toFixed(2)).join(", ") : "-";
   const speed=(value)=>Number.isFinite(value)?value.toFixed(2)+" m/s":"-";
+  const black=typeof targets!=='undefined'?targetAt(curT):null;
+  document.getElementById('hTargetSpeed').textContent=black?speed(Math.hypot(...black.v)):'-';
+  document.getElementById('hTargetLead').textContent=Number.isFinite(black?.lead)?black.lead.toFixed(2)+' s':'-';
   document.getElementById("hReference").textContent=speed(st?.reference_speed);
   document.getElementById("hCommand").textContent=speed(st?.u?Math.hypot(...st.u):undefined);
   document.getElementById("hLimit").textContent=speed(st?.speed_limit);
@@ -289,8 +304,9 @@ function updateHUD(){
     document.getElementById("hVmag").textContent = Math.hypot(...st.v).toFixed(2)+" m/s";
     document.getElementById("hAcc").textContent = fmt(st.a);
   }
-  if(goal && st){
-    const dx=st.p[0]-goal[0], dy=st.p[1]-goal[1], dz=st.p[2]-goal[2];
+  const activeGoal=black?.p || goal;
+  if(activeGoal && st){
+    const dx=st.p[0]-activeGoal[0], dy=st.p[1]-activeGoal[1], dz=st.p[2]-activeGoal[2];
     document.getElementById("hGoalDist").textContent = Math.hypot(dx,dy,dz).toFixed(2)+" m";
   }
   document.getElementById("tlabel").textContent =
@@ -340,7 +356,7 @@ function moveSimulatorCamera(dx,dy,pan=false){
     simulatorCamera.azimuth=Math.atan2(Math.sin(simulatorCamera.azimuth-dx*.006),Math.cos(simulatorCamera.azimuth-dx*.006));
     // Saturate at the preset's poles, so dragging back responds immediately.
     const view=document.getElementById('simView').value;
-    const base=view==='top'?Math.atan2(35,.1):view==='overview'?Math.atan2(1,Math.SQRT2):Math.atan2(7,13);
+    const base=(view==='top'||view==='pair_top')?Math.atan2(35,.1):view==='overview'?Math.atan2(1,Math.SQRT2):Math.atan2(7,13);
     simulatorCamera.elevation=Math.max(-85*Math.PI/180-base,
       Math.min(89.9*Math.PI/180-base,simulatorCamera.elevation+dy*.006));
   }
@@ -516,9 +532,9 @@ function simulationClockRecording(recording){
     return simTime(a)+(simTime(b)-simTime(a))*(t-a.t)/(b.t-a.t);
   }
   const result={...recording,clock:'simulation'};
-  for(const stream of ['states','points','plans','maps','geometry','outcomes','guides','exploration']){
+  for(const stream of ['states','targets','points','plans','maps','geometry','outcomes','guides','exploration']){
     if(recording[stream]) result[stream]=recording[stream].map(event=>Number.isFinite(event.t)?
-      {...event,wall_t:event.t,t:stream==='states'?simTime(event):convert(event.t)}:event);
+      {...event,wall_t:event.t,t:(stream==='states'||stream==='targets')&&Number.isFinite(event.sim_timestamp_ns)?simTime(event):convert(event.t)}:event);
   }
   return result;
 }
@@ -529,7 +545,8 @@ function applyRecording(r){
   goal=r.goal||null;
   if(r.map_size) mapSize=r.map_size;
   geometry=r.geometry||[]; states=r.states||[]; points=r.points||[]; plans=r.plans||[]; maps=r.maps||[];
-  for(const stream of [geometry,states,points,plans,maps])stream.sort((a,b)=>a.t-b.t || (a.seq||0)-(b.seq||0));
+  targets=r.targets||[];
+  for(const stream of [geometry,states,targets,points,plans,maps])stream.sort((a,b)=>a.t-b.t || (a.seq||0)-(b.seq||0));
   fullPersistent=r.persistent||[];
   fullPersistentUnknown=r.persistent_unknown||[];
   if(r.persistent_bbox && r.persistent_bbox.length===6) applyRange(r.persistent_bbox);
@@ -591,7 +608,7 @@ let liveSeen={},liveGeneration=0;
 function appendLive(f){
   if(f.empty) return;
   if(f.goal) goal=f.goal; if(f.map_size) mapSize=f.map_size;
-  for(const [key,list,value] of [['state',states,f.state],['point',points,f.point],['plan',plans,f.plan],['map',maps,f.map],['geometry',geometry,f.geometry]]){
+  for(const [key,list,value] of [['state',states,f.state],['target',targets,f.target],['point',points,f.point],['plan',plans,f.plan],['map',maps,f.map],['geometry',geometry,f.geometry]]){
     if(!value) continue; const id=value.seq??value.t;
     if(liveSeen[key]===id) continue; liveSeen[key]=id;
     list.push(value); if(list.length>2000) list.splice(0,list.length-2000);
@@ -604,7 +621,7 @@ function startLive(){
   timelineClock='墙钟时间';
   mode='live'; const generation=++liveGeneration; liveSeen={};
   simulatorDisplay();
-  states=[]; points=[]; plans=[]; maps=[]; geometry=[];
+  states=[]; targets=[]; points=[]; plans=[]; maps=[]; geometry=[];
   fullPersistent=[]; fullPersistentUnknown=[]; persistent=[]; persistentUnknown=[];
   goal=null; rangeBbox=null; setRangeInputs(null); setPlay(false);
   document.getElementById('btnLive').classList.add('active');

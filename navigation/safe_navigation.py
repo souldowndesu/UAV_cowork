@@ -65,10 +65,12 @@ def seed_history(history, data, origin, res):
     """Same centre-query semantics as seed_local, without sorting every voxel."""
     axes=[np.floor((origin[a]+(np.arange(data.shape[a])+.5)*res-history.origin[a])/history.res).astype(int) for a in range(3)]
     block_axes=[np.floor_divide(a,history.block) for a in axes]
+    groups=[{int(b):np.flatnonzero(block_axes[a]==b) for b in np.unique(block_axes[a])} for a in range(3)]
     filled=0
-    for key, block in list(history.blocks.items()):
-        indices=[np.flatnonzero(block_axes[a]==key[a]) for a in range(3)]
-        if any(len(i)==0 for i in indices):continue
+    for key in itertools.product(*groups):
+        block=history.blocks.get(key)
+        if block is None:continue
+        indices=[groups[a][key[a]] for a in range(3)]
         local_index=np.ix_(*indices)
         values=block[np.ix_(*[axes[a][indices[a]]%history.block for a in range(3)])]
         local=data[local_index]
@@ -94,7 +96,7 @@ def merge_history(history,data,origin,res):
     return count
 
 
-def integrate_sensor_history(history,origin,points,cfg):
+def integrate_sensor_history(history,origin,points,cfg,delta=None):
     """Persist measured rays in the complete sensor sphere, beyond local z bounds."""
     res=history.res;half=cfg.max_range
     low=history.origin+np.floor((origin-half-history.origin)/res)*res
@@ -111,7 +113,18 @@ def integrate_sensor_history(history,origin,points,cfg):
     cells=np.floor((hits-history.origin)/res).astype(int)-base
     observed.data[observed.data==2]=0
     if len(cells):observed.data[tuple(cells.T)]=2
-    merge_history(history,observed.data,observed.origin,res)
+    if delta is None:
+        merge_history(history,observed.data,observed.origin,res)
+    else:
+        # Raycast and coarse aggregation once, then apply the same observations
+        # to the working history and save delta. Do not integrate seed cells.
+        from .persistent_map import PersistentMap
+        measured=PersistentMap(history.res,history.block,history.origin)
+        merge_history(measured,observed.data,observed.origin,res)
+        for destination in (history,delta):
+            for key,block in measured.blocks.items():
+                old=destination.blocks.setdefault(key,np.zeros_like(block))
+                np.copyto(old,block,where=block!=0)
     return rays
 
 
@@ -227,10 +240,30 @@ class RouteCoordinator:
         self._u = np.zeros(3); self._acc = np.zeros(3); self._last_ts = None
         self.min_clearance = cfg.d_max; self.emergency = False
         self._route_lock = threading.Lock()
+        self.moving_target = None
 
     def set_trajectory(self, route, now):
         with self._route_lock:
             self.traj, self.t0 = route, now
+
+    def terminal_velocity(self, state, snap, now):
+        """Use target velocity only after checking the whole close-follow chord."""
+        moving=self.moving_target;cfg=self.cfg
+        if moving is None or snap is None or now-snap.ts>=cfg.map_stale_timeout or now-moving['wall_t']>=1.5:
+            return None
+        delta=np.asarray(moving['follow_goal'])-state.position
+        distance=np.linalg.norm(delta)
+        direction=delta/max(distance,1e-6)
+        closing=max(0.,float((state.velocity-np.asarray(moving['velocity']))@direction))
+        horizon=10.+closing*cfg.brake_reaction+closing**2/(2.*cfg.a_max)
+        if distance>=horizon:return None
+        chord=state.position+np.linspace(0.,1.,max(3,int(distance/.25)+1))[:,None]*delta
+        if not (clearances(chord,snap,cfg.res)>=route_clearance(cfg)).all():return None
+        reserve=cfg.a_max*cfg.brake_reaction
+        closing_limit=max(0.,-reserve+np.sqrt(reserve**2+2.*cfg.a_max*distance))
+        correction=direction*min(1.1*distance,closing_limit)
+        requested=np.asarray(moving['velocity'])+correction
+        return requested*min(1.,min(cfg.v_mission,cfg.v_max)/max(np.linalg.norm(requested),1e-6))
 
     def tick(self, state, now):
         cfg = self.cfg
@@ -301,6 +334,9 @@ class RouteCoordinator:
             self.min_clearance = float(clearances([state.position],snap,cfg.res)[0])
         else:
             braking = True
+        terminal=self.terminal_velocity(state,snap,now)
+        if terminal is not None:
+            target=terminal;speed_limit=min(cfg.v_mission,cfg.v_max);braking=False
         # A newly observed wall can invalidate a stationary start in the coarser
         # grid. Move slowly along an increasing-clearance chord, never snap the
         # search start to another cell or relax the physical clearance check.
@@ -399,11 +435,24 @@ class SafeNavigationPipeline(NavigationPipeline):
         self.explorer=ProgressExplorer(cfg) if cfg.progress_exploration and not (cfg.goal_occupied_confirmed or cfg.goal_in_building_confirmed) else None
         self._guide_recorded=0;self._exploration_recorded=0
         self._historical_checked=not bool(self.persistent is not None and self.persistent.blocks)
+        self.chase_options=None;self.chase_target=None;self._last_chase_plan=0.;self._chase_plan_goal=None
+
+    def update_moving_target(self, prediction, options, wall_time):
+        with self._goal_lock:
+            self.chase_options=options;self.chase_target=prediction
+            if prediction is None:
+                self.coordinator.moving_target=None;self.coordinator.set_trajectory(None,wall_time)
+                return
+            self.goal=np.asarray(prediction['goal']).copy();self.reached=False;self.approach_goal=None
+            v=np.asarray(prediction['velocity'])
+            self.coordinator.moving_target=dict(follow_goal=np.asarray(prediction['follow_goal']).copy(),
+                                               velocity=v.copy(),wall_t=wall_time)
 
     def _select_approach(self, proxy, started):
         # Arrival and endpoint updates share a lock. An accepted terminal goal
         # stays fixed while the mission monitor and recorder finish.
         with self._goal_lock:
+            if self.chase_options is not None:return False
             if self.reached:return False
             self.approach_goal=np.asarray(proxy,dtype=float).copy()
             self.coordinator.set_trajectory(None,started)
@@ -411,6 +460,7 @@ class SafeNavigationPipeline(NavigationPipeline):
 
     def _check_arrival(self, state):
         with self._goal_lock:
+            if self.chase_options is not None:return False
             if state.collision or self.collided:return False
             if self.reached:return True
             active=self.approach_goal if self.approach_goal is not None else self.goal
@@ -431,12 +481,22 @@ class SafeNavigationPipeline(NavigationPipeline):
             # A control RPC already in flight could supersede the first stop.
             self.io.move_by_velocity(0.,0.,0.,self.cfg.velocity_duration)
 
+    def _final_persistent_observations(self):
+        if self._frame is not None:
+            points,origin,_,_=self._frame
+            with self._persistent_delta_lock:
+                if self.cfg.persistent_full_sensor:integrate_sensor_history(self.persistent,origin,points,self.cfg,self._persistent_delta)
+                else:integrate_sensor_history(self._persistent_delta,origin,points,self.cfg)
+
     def _sensor_loop(self):
         period=1./self.cfg.sensor_hz
         while not self._stop.is_set():
             started=time.time()
             try:
                 points, origin, stamp = self.io.get_lidar_frame()
+                target=self.chase_target
+                if target is not None and len(points):
+                    points=points[np.linalg.norm(points-np.asarray(target['position']),axis=1)>1.5]
                 if len(points): self._frame=(points,origin,stamp,time.time())
                 if self.recorder is not None: self.recorder.record_points(started,points)
             except Exception as exc:
@@ -445,37 +505,56 @@ class SafeNavigationPipeline(NavigationPipeline):
 
     def _mapping_loop(self):
         cfg=self.cfg; last_stamp=None; last_seed=0.; last_merge=0.; last_save=time.time(); last_full=0.
+        last_diagnostic=0.
         while not self._stop.is_set():
             started=time.time(); frame=self._frame; state=self._latest_state
             if frame is None or state is None or frame[2]==last_stamp:
                 self._stop.wait(.03);continue
             try:
                 pts,origin,stamp,received=frame; last_stamp=stamp
+                timings=dict(points=len(pts),sensor_age=started-received);checkpoint=time.perf_counter()
                 self.map.recenter(state.position)
                 if self.persistent is not None and started-last_seed>2.:
                     if cfg.fast_history:seed_history(self.persistent,self.map.data,self.map.origin,self.map.res)
                     else:self.persistent.seed_local(self.map.data,self.map.origin,self.map.res)
                     last_seed=started
                 raycast.integrate(self.map,origin,pts,cfg)
+                timings['seed_raycast']=time.perf_counter()-checkpoint;checkpoint=time.perf_counter()
                 collision=self.map.derive_collision(state.position,np.radians(cfg.lidar_dtheta_h_deg),np.radians(cfg.lidar_dtheta_v_deg),cfg.drone_radius)
                 dist=distance_field.compute(collision,cfg)
-                if cfg.safe_shortcuts:
+                # Raw distance is used for close-obstacle escape only. A chase
+                # in open space needs the collision distance field, not two EDTs.
+                near_obstacle=float(distance_query([state.position],dist,collision.origin,cfg.res)[0][0])<cfg.d_min+cfg.route_buffer+1.5
+                if cfg.safe_shortcuts and (self.chase_options is None or near_obstacle):
                     raw_dist=distance_field.compute(self.map,cfg)
                     self.coordinator.raw_snapshot=PlanSnapshot(self.map.data.copy(),self.map.origin.copy(),raw_dist,state.position.copy(),received)
+                elif self.chase_options is not None:self.coordinator.raw_snapshot=None
                 self._snapshot=PlanSnapshot(collision.data.copy(),collision.origin.copy(),dist,state.position.copy(),received if cfg.fast_history else time.time())
                 self._map_version+=1
+                timings['collision_distance']=time.perf_counter()-checkpoint;checkpoint=time.perf_counter()
                 if self.recorder is not None:
                     self._record_map_snapshot(state.position,collision)
-                if self.persistent is not None and started-last_merge>2.:
+                timings['record_map']=time.perf_counter()-checkpoint;checkpoint=time.perf_counter()
+                if self.persistent is not None and not cfg.persistent_full_sensor and started-last_merge>2.:
                     if cfg.fast_history:merge_history(self.persistent,self.map.data,self.map.origin,self.map.res)
                     else:self.persistent.merge_from_local(self.map.data,self.map.origin,self.map.res)
                     last_merge=started
-                if self.persistent is not None and cfg.persistent_full_sensor and started-last_full>=cfg.persistent_integrate_interval:
-                    integrate_sensor_history(self.persistent,origin,pts,cfg)
+                timings['merge_local']=time.perf_counter()-checkpoint;checkpoint=time.perf_counter()
+                if self.persistent is not None and started-last_full>=cfg.persistent_integrate_interval:
+                    with self._persistent_delta_lock:
+                        if cfg.persistent_full_sensor:integrate_sensor_history(self.persistent,origin,pts,cfg,self._persistent_delta)
+                        else:integrate_sensor_history(self._persistent_delta,origin,pts,cfg)
                     last_full=started
+                timings['full_sensor']=time.perf_counter()-checkpoint;checkpoint=time.perf_counter()
                 if self.persistent is not None and started-last_save>=cfg.persistent_save_interval:
-                    self.persistent.save(self._persistent_path)
+                    self._request_persistent_save()
                     last_save=started
+                timings['save']=time.perf_counter()-checkpoint
+                timings['total']=time.time()-started
+                if started-last_diagnostic>5.:
+                    last_diagnostic=started
+                    if self.recorder is not None:self.recorder.record_event('mapping_performance',dict(t=time.time(),**timings))
+                    if timings['total']>cfg.map_stale_timeout*.75:print('[MappingSlow]',timings,flush=True)
             except Exception:
                 traceback.print_exc()
             self._stop.wait(max(.01,1./cfg.mapping_hz-(time.time()-started)))
@@ -488,6 +567,10 @@ class SafeNavigationPipeline(NavigationPipeline):
                 self._stop.wait(.05);continue
             if self.reached:
                 self._stop.wait(.05);continue
+            if self.chase_options is not None and self.chase_target is None:
+                self._stop.wait(.05);continue
+            if self.chase_options is not None and self.coordinator.terminal_velocity(state,snap,started) is not None:
+                self._stop.wait(.15);continue
             if not self._historical_checked and cfg.allow_safe_approach and (cfg.goal_occupied_confirmed or cfg.goal_in_building_confirmed):
                 self._historical_checked=True
                 try:
@@ -515,6 +598,10 @@ class SafeNavigationPipeline(NavigationPipeline):
                 preview=np.array([old.at(a) for a in np.arange(s,min(s+18.,old.arc[-1])+.1,.4)])
                 active=self.approach_goal if self.approach_goal is not None else self.goal
                 committed=remaining>cfg.route_replan_distance or (cfg.safe_shortcuts and np.linalg.norm(old.points[-1]-active)<1.)
+                if self.chase_options is not None:
+                    elapsed=started-self._last_chase_plan
+                    shift=np.linalg.norm(active-self._chase_plan_goal) if self._chase_plan_goal is not None else float('inf')
+                    committed=remaining>5. and elapsed<self.chase_options.replan_interval and shift<self.chase_options.replan_shift
                 tracking_error=np.linalg.norm(old.at(s)-state.position)
                 if committed and tracking_error<2. and (clearances(preview,snap,cfg.res)>=route_clearance(cfg)+.1).all():
                     self._stop.wait(.15);continue
@@ -552,11 +639,13 @@ class SafeNavigationPipeline(NavigationPipeline):
                 path=self.planner.plan(coarse,dist,state.position,goal,v_dir=state.velocity,w_dir=cfg.w_dir)
                 route=build_validated_route(path,state.position,coarse,dist,cfg) if path and len(path)>1 else None
                 if route is not None:
-                    route.final=np.linalg.norm(route.points[-1]-active)<1.
+                    route.final=self.chase_options is None and np.linalg.norm(route.points[-1]-active)<1.
                     # Reject a stale activation start; retry from fresh physical state.
                     current=self._latest_state
                     if np.linalg.norm(current.position-state.position)<2.:
                         self.coordinator.set_trajectory(route,time.time())
+                        if self.chase_options is not None:
+                            self._last_chase_plan=time.time();self._chase_plan_goal=np.asarray(active).copy()
                         if self.recorder is not None:
                             self.recorder.record_plan(time.time(),goal,path,route.points[::max(1,len(route.points)//300)],route.ctrl)
                         print(f'[SafePlan] route={route.arc[-1]:.1f}m start={np.round(state.position,1)} goal={np.round(goal,1)} compute={time.time()-started:.2f}s',flush=True)

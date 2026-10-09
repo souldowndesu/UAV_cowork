@@ -6,7 +6,7 @@ SAFE5 = dict(
     route_buffer=.8, curve_accel_limit=2., flight_altitude=10.,
     v_mission=5., v_max=6., map_size=(60.,60.,32.), map_back_x=30.,
     res=.4, plan_res=.8, persistent_res=.8,
-    persistent_map_path='data/maps/persistent_safe.npz',
+    persistent_map_path='data/maps/navigation_shared.npz',
     d_safe=3., d_min=1., drone_radius=.4, max_range=35., a_max=3.5,
     control_hz=30., control_dt=1./30., mapping_hz=4., planning_hz=3.,
     plan_pad=18., c_unknown=1.2,

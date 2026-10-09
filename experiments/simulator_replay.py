@@ -25,6 +25,17 @@ def angle(a, b, fraction):
     return a + math.atan2(math.sin(b-a), math.cos(b-a))*fraction
 
 
+def set_actor_pose(client,name,pose):
+    if client.simSetObjectPose(name,pose,teleport=True):return
+    # Unreal returns false for an unchanged transform as well as a missing actor.
+    current=client.simGetObjectPose(name)
+    xyz=lambda p:np.array([getattr(p,k) for k in ('x_val','y_val','z_val')])
+    quat=lambda q:np.array([getattr(q,k) for k in ('x_val','y_val','z_val','w_val')])
+    position=xyz(current.position);a=quat(current.orientation);b=quat(pose.orientation)
+    if not np.isfinite(np.r_[position,a,b]).all() or np.linalg.norm(position-xyz(pose.position))>1e-3 or min(np.linalg.norm(a-b),np.linalg.norm(a+b))>1e-4:
+        raise RuntimeError('无法更新模拟器中的无人机模型：'+name)
+
+
 def camera_controls(value=None):
     """Bound orbit controls; clients cannot supply arbitrary vehicle poses."""
     if value is None:value={}
@@ -70,7 +81,16 @@ class ReplayTimeline:
         self.plans = sorted(data.get('plans',[]),key=lambda p:p['t'])
         self.plan_times = [self.convert(p['t']) for p in self.plans]
         self.goal = points([data['goal']])[0] if data.get('goal') is not None else None
-        all_positions = np.asarray(self.positions + ([self.goal] if self.goal else []))
+        self.target_states=sorted(data.get('targets',[]),key=lambda s:s['t'])
+        self.target_positions=points([s['p'] for s in self.target_states])
+        self.target_times=[(s['sim_timestamp_ns']-stamps[0])*1e-9 if self.sim_clock and s.get('sim_timestamp_ns') is not None else self.convert(s['t']) for s in self.target_states]
+        if not np.isfinite(self.target_times).all() or np.any(np.diff(self.target_times)<0):
+            raise ValueError('目标录像时间必须有限且单调递增')
+        for state in self.target_states:
+            if not np.isfinite([state.get(k,0.) for k in ('pitch','roll','yaw')]).all():
+                raise ValueError('Non-finite target replay attitude')
+        self.target_vehicle=(data.get('config') or {}).get('target_vehicle','BlackDrone')
+        all_positions = np.asarray(self.positions+self.target_positions + ([self.goal] if self.goal else []))
         self.center = ((all_positions.min(axis=0)+all_positions.max(axis=0))*.5).tolist()
         self.span = float(np.max(np.ptp(all_positions,axis=0)))
 
@@ -93,7 +113,16 @@ class ReplayTimeline:
         if len(history)>1500: history = [history[k] for k in np.linspace(0,len(history)-1,1500,dtype=int)]
         plan_index = bisect_right(self.plan_times,seconds)-1
         plan = self.plans[plan_index] if plan_index>=0 else {}
-        return dict(seconds=seconds,position=position,attitude=attitude,history=history,
+        target=None;target_history=[]
+        ti=bisect_right(self.target_times,seconds)-1
+        if ti>=0:
+            tj=min(ti+1,len(self.target_times)-1)
+            f=(seconds-self.target_times[ti])/max(1e-9,self.target_times[tj]-self.target_times[ti]) if tj!=ti else 0.
+            tp=((1-f)*np.asarray(self.target_positions[ti])+f*np.asarray(self.target_positions[tj])).tolist()
+            target=dict(position=tp,attitude={k:angle(float(self.target_states[ti].get(k,0)),float(self.target_states[tj].get(k,0)),f) for k in ('pitch','roll','yaw')})
+            target_history=self.target_positions[:ti+1]+[tp]
+            if len(target_history)>1500:target_history=[target_history[k] for k in np.linspace(0,len(target_history)-1,1500,dtype=int)]
+        return dict(seconds=seconds,position=position,attitude=attitude,history=history,target=target,target_history=target_history,
                     path=points(plan.get('path',[])),trajectory=points(plan.get('traj',[])),
                     plan_index=plan_index,goal=plan.get('goal',self.goal))
 
@@ -103,7 +132,12 @@ class ReplayTimeline:
             target = np.asarray(self.center)
             distance = max(40.,self.span*.8)
             camera = target + [-distance,-distance,-distance]
-        elif view=='top':
+        elif view=='pair_top' and sample.get('target'):
+            other=np.asarray(sample['target']['position'])
+            target=(p+other)*.5
+            distance=max(35.,np.linalg.norm(other-p)*1.15+12.)
+            camera=target+[-.1,0.,-distance]
+        elif view in ('top','pair_top'):
             target = p
             camera = p + [-.1,0.,-35.]
         else:
@@ -134,6 +168,7 @@ class SimulatorReplay:
         self._condition=threading.Condition();self._pending=None;self._closed=False
         self._client=None;self._original_pose=None;self._original_pause=False
         self._original_actor_pose=None;self._world_offset=np.zeros(3)
+        self._target_original=None;self._target_original_actor=None;self._target_name=None;self._target_world_offset=None
         self._timeline=None;self._recording_id=None;self._last_request=0.;self._clients={}
         self._image=None;self._image_seq=0;self._last_sample=None
         self._status=dict(enabled=False,connected=False,frame_available=False,frame_sequence=0,
@@ -155,7 +190,7 @@ class SimulatorReplay:
             seconds=request.get('seconds')
             if isinstance(seconds,bool) or not isinstance(seconds,(int,float)) or not math.isfinite(seconds):
                 raise ValueError('seconds must be finite')
-            if request.get('view','follow') not in ('follow','top','overview'):raise ValueError('Unknown camera view')
+            if request.get('view','follow') not in ('follow','top','overview','pair_top'):raise ValueError('Unknown camera view')
             controls=camera_controls(request.get('camera'))
         client=request.get('client','default');seq=request.get('sequence',0)
         if not isinstance(client,str) or len(client)>128 or type(seq) is not int or seq<0:
@@ -180,9 +215,11 @@ class SimulatorReplay:
         client=airsim.MultirotorClient(ip=self.ip,port=self.port,timeout_value=3)
         if not client.ping():raise RuntimeError('AirSim RPC 未响应，请先启动模拟器')
         self._original_pause=client.simIsPause()
-        self._original_pose=client.simGetVehiclePose(vehicle_name=self.vehicle)
         vehicles=client.listVehicles()
-        if not self.vehicle and len(vehicles)!=1:raise ValueError('多载具场景请指定 --sim-vehicle')
+        if not self.vehicle:
+            if 'Drone1' in vehicles:self.vehicle='Drone1'
+            elif len(vehicles)!=1:raise ValueError('多载具场景请指定 --sim-vehicle')
+        self._original_pose=client.simGetVehiclePose(vehicle_name=self.vehicle)
         self._actor_name=self.vehicle or vehicles[0]
         self._original_actor_pose=client.simGetObjectPose(self._actor_name)
         self._world_offset=np.array([getattr(self._original_actor_pose.position,k)-getattr(self._original_pose.position,k)
@@ -200,6 +237,12 @@ class SimulatorReplay:
             self._update(camera_error='网页相机不可用：请用 replay_scene.cmd 启动回放用模拟器；仍可在模拟器窗口查看轨迹')
         self._update(connected=True,error=None)
 
+    def _restore_target(self):
+        if self._client and self._target_original:
+            self._client.simSetVehiclePose(self._target_original,True,vehicle_name=self._target_name)
+            self._client.simSetObjectPose(self._target_name,self._target_original_actor,teleport=True)
+        self._target_original=None;self._target_original_actor=None;self._target_name=None
+
     def _restore(self):
         client=self._client
         if client:
@@ -207,10 +250,12 @@ class SimulatorReplay:
                 client.simFlushPersistentMarkers()
                 if self._original_pose:client.simSetVehiclePose(self._original_pose,True,vehicle_name=self.vehicle)
                 if self._original_actor_pose:client.simSetObjectPose(self._actor_name,self._original_actor_pose,teleport=True)
+                self._restore_target()
             finally:
                 client.simPause(self._original_pause)
         self._client=None;self._original_pose=None;self._last_sample=None
         self._timeline=None;self._recording_id=None
+        self._target_original=None;self._target_original_actor=None;self._target_name=None
         with self._condition:self._image=None
         self._update(enabled=False,connected=False,frame_available=False,recording_id=None)
 
@@ -223,7 +268,9 @@ class SimulatorReplay:
         if telemetry_path.is_file():
             try:telemetry=json.loads(telemetry_path.read_text(encoding='utf-8'))
             except (OSError,ValueError):pass
-        self._timeline=ReplayTimeline(data,telemetry)
+        timeline=ReplayTimeline(data,telemetry)
+        self._restore_target()
+        self._timeline=timeline
         self._recording_id=identity;self._last_sample=None
         with self._condition:self._image=None
         self._update(frame_available=False,recording_id=identity)
@@ -247,16 +294,7 @@ class SimulatorReplay:
         # and markers use world NED, unlike the vehicle's spawn-relative pose.
         world=lambda p:(np.asarray(p)+self._world_offset).tolist()
         actor_pose=api.Pose(vec(world(sample['position'])),pose.orientation)
-        if not client.simSetObjectPose(self._actor_name,actor_pose,teleport=True):
-            # UE also returns false for an unchanged transform, e.g. switching
-            # cameras while paused. Distinguish that from a missing/wrong actor.
-            current=client.simGetObjectPose(self._actor_name)
-            xyz=lambda p:np.array([getattr(p,k) for k in ('x_val','y_val','z_val')])
-            quat=lambda q:np.array([getattr(q,k) for k in ('x_val','y_val','z_val','w_val')])
-            a,b=quat(current.orientation),quat(actor_pose.orientation)
-            position=xyz(current.position)
-            if not np.isfinite(np.r_[position,a,b]).all() or np.linalg.norm(position-xyz(actor_pose.position))>1e-3 or min(np.linalg.norm(a-b),np.linalg.norm(a+b))>1e-4:
-                raise RuntimeError('无法更新模拟器中的无人机模型')
+        set_actor_pose(client,self._actor_name,actor_pose)
         # Infinite markers survive physics pause; explicitly clear on every seek
         # so rewinding also removes the old future portion of the flown track.
         client.simFlushPersistentMarkers()
@@ -266,6 +304,22 @@ class SimulatorReplay:
             if len(path)>1:client.simPlotLineStrip([vec(world(p)) for p in path],color,thickness=width,is_persistent=True)
         if sample['goal'] is not None:
             client.simPlotPoints([vec(world(sample['goal']))],[1.,.482,.447,1.],size=18.,is_persistent=True)
+        target=sample.get('target')
+        if target is not None:
+            name=self._timeline.target_vehicle
+            if self._target_name!=name:
+                if name not in client.listVehicles():raise RuntimeError('目标机不存在；请用新版 replay_scene.cmd 启动双机场景')
+                self._target_name=name
+                self._target_original=client.simGetVehiclePose(vehicle_name=name)
+                self._target_original_actor=client.simGetObjectPose(name)
+                self._target_world_offset=np.array([getattr(self._target_original_actor.position,k)-getattr(self._target_original.position,k) for k in ('x_val','y_val','z_val')])
+                client.cancelLastTask(vehicle_name=name)
+            a=target['attitude'];q=api.to_quaternion(a['pitch'],a['roll'],a['yaw'])
+            world_target=np.asarray(world(target['position']))
+            client.simSetVehiclePose(api.Pose(vec(world_target-self._target_world_offset),q),True,vehicle_name=name)
+            set_actor_pose(client,name,api.Pose(vec(world_target),q))
+            if len(sample['target_history'])>1:
+                client.simPlotLineStrip([vec(world(p)) for p in sample['target_history']],[1.,.85,.03,1.],thickness=5.,is_persistent=True)
         if self._camera_ready:
             camera,pitch,yaw=self._timeline.camera(sample,view,controls)
             client.simSetCameraPose(self.camera_name,api.Pose(vec(world(camera)),api.to_quaternion(pitch,0.,yaw)),

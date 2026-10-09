@@ -167,6 +167,8 @@ def main(argv=None):
     parser.add_argument("--scenario", help="固定场景 JSON；显式起点/目标参数及配置覆盖优先")
     parser.add_argument("--map-policy", choices=("cold", "snapshot", "shared"), default=None,
                         help="初始持久图：cold 每轮空图 / snapshot 每轮同一先验 / shared 共享学习（旧行为）")
+    parser.add_argument('--load-map',action=argparse.BooleanOptionalAction,default=None,
+                        help='是否使用共享地图先验；无论是否加载，新增观测始终保存到共享地图')
     parser.add_argument("--max-duration", type=float, default=None,
                         help="导航阶段墙钟时限（秒）；0 不限时；固定场景默认 240 秒，不含起飞")
     args, rest = parser.parse_known_args(argv)
@@ -264,9 +266,12 @@ def main(argv=None):
         visualize = False
 
     ts = time.strftime("%Y%m%d_%H%M%S") + f"_{time.time_ns() % 1000000000:09d}"
+    # Experiment observation collection is always enabled; loading is separate.
+    cfg.use_persistent_map=True
     # 输出目录固定到脚本所在目录（避免相对 CWD 漂移）
     base_outdir = str(project_path(cfg.log_dir) / ts)
-    policy = args.map_policy or (scenario.get("map_policy", "snapshot") if scenario else "shared")
+    policy = args.map_policy or (scenario.get("map_policy", "snapshot") if scenario else ('shared' if cfg.load_persistent_map else 'cold'))
+    if args.load_map is not None:policy='shared' if args.load_map else 'cold'
     initial_config = cfg.to_dict()
     baseline = MapBaseline(cfg, policy, base_outdir)
 

@@ -1,13 +1,12 @@
-"""Reproducible scene inputs and per-run map isolation for scene_test.py."""
+"""Reproducible scene inputs with a shared observation store."""
 from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 from pathlib import Path
 
 import numpy as np
-from navigation.paths import PROJECT_ROOT, ENVIRONMENT, project_path
+from navigation.paths import PROJECT_ROOT, ENVIRONMENT, SHARED_MAP, project_path
 
 ROOT = PROJECT_ROOT
 
@@ -35,37 +34,33 @@ class MapBaseline:
     def __init__(self, cfg, policy, batch_dir):
         self.enabled = bool(cfg.use_persistent_map)
         self.policy = policy
-        self.source = Path(cfg.persistent_map_path)
+        self.source = Path(cfg.persistent_seed_path or cfg.persistent_map_path)
         if not self.source.is_absolute():
             self.source = ROOT / self.source
         self.source = self.source.resolve()
-        self.snapshot = Path(batch_dir) / 'initial_map.npz'
+        self.snapshot = self.source
         self.source_hash = file_hash(self.source) if self.enabled and policy != 'cold' else None
-        if self.enabled and policy == 'snapshot' and self.source.exists():
-            self.snapshot.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(self.source, self.snapshot)
-            metadata=Path(str(self.source)+'.meta.json')
-            if metadata.exists():shutil.copy2(metadata,Path(str(self.snapshot)+'.meta.json'))
-            if file_hash(self.snapshot) != self.source_hash:
-                raise RuntimeError('Prior map changed while the initial snapshot was copied')
+        self.seed=None
+        if self.enabled and policy=='snapshot':
+            from navigation.persistent_map import PersistentMap
+            self.seed=PersistentMap.load(self.source,cfg.persistent_res,cfg.persistent_block,cfg.persistent_origin,strict=True)
 
     def prepare(self, cfg, outdir):
         if not self.enabled:
             return dict(policy=self.policy, enabled=False, initial_sha256=None)
-        if self.policy == 'shared':
-            return dict(policy=self.policy, enabled=True, path=str(self.source), initial_sha256=file_hash(self.source))
-        target = Path(outdir) / 'run_map.npz'
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            raise FileExistsError('Refusing to reuse an existing experimental map')
-        if self.policy == 'snapshot' and self.snapshot.exists():
-            shutil.copy2(self.snapshot, target)
-            metadata=Path(str(self.snapshot)+'.meta.json')
-            if metadata.exists():shutil.copy2(metadata,Path(str(target)+'.meta.json'))
-        cfg.persistent_map_path = str(target.resolve())
+        cfg.persistent_map_path = str(SHARED_MAP)
+        cfg.persistent_accumulate=True
+        cfg.load_persistent_map = self.policy == 'shared'
+        cfg.persistent_seed_path = str(self.source) if self.policy == 'snapshot' else ''
+        cfg._persistent_seed=self.seed
+        if self.policy=='shared':
+            self.source=SHARED_MAP.resolve();self.source_hash=file_hash(self.source)
+        if self.policy == 'snapshot' and self.source!=SHARED_MAP.resolve() and self.source_hash!=file_hash(self.source):
+            raise RuntimeError('Initial snapshot changed since the batch started')
         return dict(policy=self.policy, enabled=True, path=cfg.persistent_map_path,
-                    initial_sha256=file_hash(target), source_path=str(self.source),
-                    source_sha256=self.source_hash)
+                    initial_sha256=self.source_hash, source_path=str(self.source),
+                    source_sha256=self.source_hash,accumulates_observations=True,
+                    loads_history=self.policy!='cold',loads_shared_map=cfg.load_persistent_map,seed_path=cfg.persistent_seed_path)
 
 
 def run_metadata(cfg, start, goal, yaw, prior, scenario=None):

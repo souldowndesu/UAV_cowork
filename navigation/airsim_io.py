@@ -56,8 +56,9 @@ class AirSimIO:
     def _connect_locked(self):
         import airsim
         self._airsim = airsim
-        client = airsim.MultirotorClient(ip=self.cfg.ip, port=self.cfg.port)
-        client.confirmConnection()
+        client = airsim.MultirotorClient(ip=self.cfg.ip, port=self.cfg.port,timeout_value=8)
+        if not client.ping():raise RuntimeError('AirSim RPC did not respond')
+        if not self.cfg.vehicle_name and 'Drone1' in client.listVehicles():self.cfg.vehicle_name='Drone1'
         return client
 
     def _client_locked(self):
@@ -84,8 +85,11 @@ class AirSimIO:
 
     def takeoff(self):
         with self._lock:
-            c = self._client_locked()
-            c.takeoffAsync(vehicle_name=self.cfg.vehicle_name).join()
+            self._client_locked()
+            c=self._airsim.MultirotorClient(ip=self.cfg.ip,port=self.cfg.port,timeout_value=90)
+            try:
+                c.takeoffAsync(timeout_sec=30,vehicle_name=self.cfg.vehicle_name).get()
+            finally:c.client.close()
 
     def land(self):
         with self._lock:
@@ -107,9 +111,18 @@ class AirSimIO:
 
     def move_to_z(self, z: float, velocity: float = 2.0):
         with self._lock:
-            c = self._client_locked()
-            c.moveToZAsync(float(z), float(velocity),
-                           vehicle_name=self.cfg.vehicle_name).join()
+            self._client_locked()
+            travel=abs(float(z)-self.get_state().position[2])/max(float(velocity),.1)
+            # join() hides msgpack RPC errors. A slow simulator needs a longer
+            # startup connection, while sensor/control requests stay bounded.
+            c=self._airsim.MultirotorClient(ip=self.cfg.ip,port=self.cfg.port,timeout_value=min(300,max(60,4*(travel+10))))
+            try:
+                c.moveToZAsync(float(z),float(velocity),timeout_sec=travel+30,
+                              vehicle_name=self.cfg.vehicle_name).get()
+            finally:c.client.close()
+            actual=self.get_state().position[2]
+            if abs(actual-float(z))>.8:
+                raise RuntimeError(f'Climb ended at z={actual:.2f}, requested {float(z):.2f}')
 
     def move_by_velocity(self, vx: float, vy: float, vz: float, duration: float):
         """唯一写者下发的速度指令（在锁内完成 RPC 发送，fire-and-forget）。"""

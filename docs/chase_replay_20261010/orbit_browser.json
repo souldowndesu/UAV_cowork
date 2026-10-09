@@ -1,0 +1,32 @@
+{
+  "passed": true,
+  "unified_default_entrypoint": true,
+  "default_cloud_with_scene_switch": true,
+  "real_mouse_orbit": true,
+  "right_button_pan": true,
+  "wheel_zoom": true,
+  "camera_persists_during_playback": true,
+  "reset_button": true,
+  "presets": [
+    "top",
+    "overview",
+    "follow",
+    "pair_top"
+  ],
+  "paused_seconds": 12,
+  "before_frame": 43,
+  "orbit_frame": 45,
+  "adjusted": {
+    "azimuth": -0.9600000000000002,
+    "elevation": -0.27,
+    "zoom": 0.6872892787909722,
+    "pan": [
+      -0.105,
+      0.0525
+    ]
+  },
+  "errors": [],
+  "dual_drone_target_frames": 643,
+  "python_tests": 65,
+  "ui_tests": 18
+}

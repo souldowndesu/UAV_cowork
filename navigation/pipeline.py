@@ -79,6 +79,9 @@ class NavigationPipeline:
         self._persistent_path = None
         self._last_persist_save = 0.0
         self._last_persist_integrate = 0.0
+        self._persistent_delta_lock=threading.Lock()
+        self._persist_worker=None
+        self._persist_save_error=None
         if bool(getattr(cfg, "use_persistent_map", False)):
             from .persistent_map import PersistentMap
             p_res = float(getattr(cfg, "persistent_res", 0.6))
@@ -88,11 +91,22 @@ class NavigationPipeline:
                 p_path = os.path.join(
                     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), p_path)
             self._persistent_path = p_path
-            self.persistent = PersistentMap.load(
-                p_path,
+            seed_path=getattr(cfg,'persistent_seed_path','')
+            if seed_path and not os.path.isabs(seed_path):seed_path=os.path.join(os.path.dirname(os.path.dirname(__file__)),seed_path)
+            load_path=seed_path or p_path
+            seed=getattr(cfg,'_persistent_seed',None)
+            self.persistent = (PersistentMap.load(
+                load_path,
                 res=p_res,
                 block=int(getattr(cfg, "persistent_block", 16)),
                 origin=tuple(getattr(cfg, "persistent_origin", (0.0, 0.0, 0.0))))
+                if seed is None and (getattr(cfg,'load_persistent_map',True) or seed_path) else
+                PersistentMap(p_res,int(cfg.persistent_block),cfg.persistent_origin))
+            if seed is not None:
+                self.persistent=PersistentMap(seed.res,seed.block,seed.origin)
+                self.persistent.blocks={key:block.copy() for key,block in seed.blocks.items()}
+                self.persistent.approaches=dict(seed.approaches)
+            self._persistent_delta=PersistentMap(self.persistent.res,self.persistent.block,self.persistent.origin)
             # 坐标对齐校验：持久图边长必须是局部图边长的整数倍
             self.persistent.validate_alignment(cfg.res)
             print(f"[PersistentMap] 已加载先验：{self.persistent.stats()}", flush=True)
@@ -105,6 +119,42 @@ class NavigationPipeline:
     def set_goal(self, goal):
         self.goal = np.asarray(goal, dtype="float64")
 
+    def _save_persistent_map(self):
+        if getattr(self.cfg,'persistent_accumulate',True):
+            from .shared_map import merge_observations
+            with self._persistent_delta_lock:
+                merge_observations(self._persistent_delta,self._persistent_path,dict(self.persistent.approaches))
+                self._persistent_delta.blocks.clear()
+                self._persist_save_error=None
+        else:self.persistent.save(self._persistent_path)
+
+    def _request_persistent_save(self):
+        """Detach an observation delta; disk I/O never blocks local mapping."""
+        if self._persist_worker is not None and self._persist_worker.is_alive():return
+        if not getattr(self.cfg,'persistent_accumulate',True):
+            self._save_persistent_map();return
+        from .persistent_map import PersistentMap
+        with self._persistent_delta_lock:
+            pending=self._persistent_delta
+            self._persistent_delta=PersistentMap(pending.res,pending.block,pending.origin)
+        approaches=dict(self.persistent.approaches)
+        def save():
+            try:
+                from .shared_map import merge_observations
+                merge_observations(pending,self._persistent_path,approaches)
+                self._persist_save_error=None
+            except Exception as exc:
+                # Keep failed observations for retry; newer observed cells win.
+                with self._persistent_delta_lock:
+                    for key,block in pending.blocks.items():
+                        current=self._persistent_delta.blocks.get(key)
+                        if current is None:self._persistent_delta.blocks[key]=block
+                        else:np.copyto(current,block,where=current==0)
+                self._persist_save_error=str(exc)
+                print('[PersistentMap] Background save failed:',exc,flush=True)
+        self._persist_worker=threading.Thread(target=save,name='map-save',daemon=True)
+        self._persist_worker.start()
+
     def start(self):
         self._stop.clear()
         self._threads = [
@@ -116,18 +166,30 @@ class NavigationPipeline:
         for t in self._threads:
             t.start()
 
+    def _final_persistent_observations(self):
+        if self._latest_state is not None:
+            with self._points_lock:points=self._points.copy()
+            with self._persistent_delta_lock:
+                self._persistent_delta.integrate_frame(self._latest_state.position,points,self.cfg.max_range,self.cfg.self_echo_dist)
+
     def stop(self):
         self._stop.set()
         for t in self._threads:
             t.join(timeout=2.0)
+        if self._persist_worker is not None:
+            self._persist_worker.join(timeout=25.)
+            if self._persist_worker.is_alive():raise RuntimeError('Shared map save is still running')
         # 终盘：把最后一张 raw 图写回持久图并落盘（保证完整建模，最多丢 5s）
         if self.persistent is not None:
             try:
+                self._final_persistent_observations()
                 self.persistent.merge_from_local(self.map.data, self.map.origin, self.map.res)
-                self.persistent.save(self._persistent_path)
+                self._save_persistent_map()
                 print(f"[PersistentMap] 终盘完成：{self.persistent.stats()}", flush=True)
             except Exception as e:
+                self._persist_save_error=str(e)
                 print(f"[PersistentMap] 终盘失败：{e}", flush=True)
+                raise RuntimeError('Shared map final save failed') from e
 
     # ------------------------------------------------------------------
     # 线程体
@@ -182,6 +244,8 @@ class NavigationPipeline:
                         self.persistent.integrate_frame(
                             state.position, pts, cfg.max_range,
                             float(getattr(cfg, "self_echo_dist", 0.3)))
+                        with self._persistent_delta_lock:
+                            self._persistent_delta.integrate_frame(state.position,pts,cfg.max_range,cfg.self_echo_dist)
                     except Exception as e:
                         print(f"[PersistentMap] 全向建图失败：{e}", flush=True)
                     self._last_persist_integrate = now
@@ -213,7 +277,7 @@ class NavigationPipeline:
                 now = time.time()
                 if now - self._last_persist_save >= cfg.persistent_save_interval:
                     self.persistent.merge_from_local(self.map.data, self.map.origin, self.map.res)
-                    self.persistent.save(self._persistent_path)
+                    self._request_persistent_save()
                     self._last_persist_save = now
             time.sleep(max(0.0, period - (time.time() - t0)))
 

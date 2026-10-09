@@ -20,7 +20,7 @@ def digest(path):
 
 def inputs(root):
     files={}
-    for name in ('README.md','scene_test.py','replay.py','requirements.txt','setup_env.cmd','fly.cmd','replay_scene.cmd'):
+    for name in ('README.md','scene_test.py','chase_test.py','replay.py','requirements.txt','setup_env.cmd','fly.cmd','replay_scene.cmd'):
         files[name]=root/name
     for folder in ('navigation','experiments','data','environment','docs'):
         for path in (root/folder).rglob('*'):

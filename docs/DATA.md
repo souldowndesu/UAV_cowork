@@ -6,19 +6,20 @@
 
 | 目录 | 内容 | 运行时用途 |
 | --- | --- | --- |
-| `data/examples/` | catalog、24 条验证飞行、各自地图与场景输入、summary、verification | 基准回放与恢复原先验重飞 |
+| `data/examples/` | catalog、24 条验证飞行、各自地图与场景输入、summary、verification | 基准回放与复用任务参数重飞 |
 | `data/records/` | 每次新飞行的独立目录；重飞集中在 example_runs | 查看新结果、诊断、对比与流式保存 |
 | `data/maps/` | 长期共享的持久地图及元数据 | 为新导航提供历史先验 |
 
-示例中的地图与记录内 `run_map.npz` 是该案例的一部分，不抽走到 maps，以保持快照关系与原始文件 SHA-256。maps 只管理独立复用的地图。24 个示例的编号、相对目录和飞行文件内容没有改变。
+示例中的地图与旧记录内 `run_map.npz` 是该案例的一部分，不抽走到 maps，以保持快照关系与原始文件 SHA-256。maps 只管理独立复用的地图。24 个示例的编号、相对目录和飞行文件内容没有改变。
 
 ## 单次记录
 
-- `manifest.json`、`chunk_*.json.gz`：v2 流式录像，含 states、points、plans、maps 与事件；完整复制时带整个目录。
+- `manifest.json`、`chunk_*.json.gz`：v2 流式录像，含 states、points、plans、maps、targets 与事件；完整复制时带整个目录。
 - `recording.json`：兼容旧格式；流式记录主要读取 manifest。
 - `telemetry.json` / `.csv`：状态、速度、指令、净空、碰撞与目标数据。
 - `run_meta.json`：配置、起点、目标、地图先验哈希、源码哈希、启动状态和任务结果。
-- `initial_map.npz` / `run_map.npz`：批次先验与独立运行地图。
+- 新运行统一写入 `data/maps/navigation_shared.npz`，不再创建 initial_map / run_map；旧示例中的这类文件是不可变原始证据。
+- `chase_telemetry.json` / `chase_summary.json`：双机距离、预测、捕获与目标执行质量；比较汇总在 chase_runs/batches/。
 - `evaluation/`：评估 JSON、Markdown 及可选图表。
 
 历史记录与示例的 provenance 字段可能包含原目录的绝对路径；为了保存原始证据，不对它们做替换。当前工具使用 catalog 相对路径定位录制和快照，在新输出中写入当前目录。移动 records 根目录不改变其中的相对布局，录制库 ID 仍依据相对路径生成。
@@ -41,3 +42,7 @@
 | `web/` | `experiments/web/` |
 
 如果外部代码此前 `from nav...`，需改成 `from navigation...`，录制与评估模块改成 `from experiments...`，配置改成 `from navigation.config import Config`。根目录的用户启动命令继续保留。
+
+旧 data/maps/persistent_map.npz 已移到 archive/20261010_chase/legacy_maps，SHA-256 与移动清单保存在该目录。当前 maps 仅保留 navigation_shared.npz 及其元数据 / 锁文件。
+
+移动目标任务的早期初始化、旧预设、同步保存与起飞 RPC 诊断保存在 archive/20261010_chase/diagnostic_records，moves.json 含移动原因和全部文件校验值。正式比较、压力测试失败与修复复核记录继续保存在 records，并可直接选择回放。

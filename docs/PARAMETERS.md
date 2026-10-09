@@ -8,9 +8,11 @@
 python scene_test.py --goal-x 40 --goal-y 5 --profile safe5 --speed 4 --v-max 5 --d-safe 3 --map-size '(60,60,32)' --map-policy cold
 ```
 
-Config 字段下划线改为连字符，例如 `persistent_map_path` 对应 `--persistent-map-path`；布尔字段传 `true` / `false`。场景文件使用原始字段名。优先级为 profile < 场景 config < 命令行；`--speed` 等同 `v_mission`，不能超过 `v_max`。配置校验会拒绝非有限数字与不一致的安全 / 动力学参数。
+Config 字段下划线改为连字符，例如 `persistent_map_path` 对应 `--persistent-map-path`；布尔字段传 `true` / `false`。场景文件使用原始字段名。优先级为 profile < 场景 config < 命令行；`--speed` 等同 `v_mission`，不能超过 `v_max`。入口会检查巡航速度和坐标的合法性；自定义安全间隔、加速度等参数应保持合理关系。
 
 目标 / 起点 / 次数 / 超时 / map-policy / 录像等由 scene_test 的显式参数提供，完整列表 `python scene_test.py --help`。`--goal-altitude` 使用正数高度，内部转负 z；`--goal-z` 是原始 NED 值，二者互斥。
+
+scene_test、chase_test 和 examples 重飞固定启用地图观测收集，并将输出路径固定为统一共享图；不能通过通用 Config 覆盖禁用保存或改成每轮地图。是否读取历史用 `--load-map` / `--no-load-map`、scene_test 的 `--map-policy` 控制。低层 Config 仍可供单独算法调用使用。
 
 确认建筑内部目标时可用 `--goal-in-building-confirmed true --goal-occupied-confirmed true`；安全接近结果保留原目标和当前接近点。历史地图必须属于同一场景和原点。relative paths 统一以项目根目录为基准。
 
@@ -104,10 +106,13 @@ Config 字段下划线改为连字符，例如 `persistent_map_path` 对应 `--p
 | `takeoff_altitude` | `3.0` | `3.0` | `3.0` | 起飞后离地高度，米 |
 | `flight_altitude` | `8.0` | `10.0` | `10.0` | 目标巡航高度（NED：发送时取负），米 |
 | `use_persistent_map` | `true` | `true` | `true` | 是否启用持久图先验加载与写回；False = 回到第一阶段行为 |
-| `persistent_res` | `0.6` | `0.8` | `0.8` | 持久图体素边长 r_G，米。必须是 res(0.2) 的整数倍（保证坐标对齐） |
+| `persistent_res` | `0.8` | `0.8` | `0.8` | 共享地图统一分辨率，必须是局部 res 的整数倍 |
 | `persistent_block` | `16` | `16` | `16` | 稀疏块边长（体素数），§5 |
 | `persistent_origin` | `[0.0, 0.0, 0.0]` | `[0.0, 0.0, 0.0]` | `[0.0, 0.0, 0.0]` | 单一世界锚点（NED），索引可为负 |
-| `persistent_map_path` | `"data/maps/persistent_map.npz"` | `"data/maps/persistent_safe.npz"` | `"data/maps/persistent_safe.npz"` | 相对 NavigationPhase1 目录 |
+| `persistent_map_path` | `"data/maps/navigation_shared.npz"` | `"data/maps/navigation_shared.npz"` | `"data/maps/navigation_shared.npz"` | 统一观测库 |
+| `load_persistent_map` | `true` | `true` | `true` | 仅控制规划先验，不控制观测保存 |
+| `persistent_seed_path` | `""` | `""` | `""` | 可选只读初始快照，仍合并到共享观测库 |
+| `persistent_accumulate` | `true` | `true` | `true` | 所有新观测合并保存，禁止空图覆盖 |
 | `persistent_save_interval` | `5.0` | `5.0` | `5.0` | 落盘间隔（秒）；任务结束必落盘 |
 | `persistent_integrate_interval` | `1.0` | `2.0` | `2.0` | 全向建图周期（秒）：把整帧点云未裁剪地写进持久图（§54） |
 | `seed` | `0` | `0` | `0` |  |

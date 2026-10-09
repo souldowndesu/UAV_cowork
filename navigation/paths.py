@@ -5,6 +5,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = PROJECT_ROOT / 'data'
 RECORDS = DATA_ROOT / 'records'
 MAPS = DATA_ROOT / 'maps'
+SHARED_MAP = MAPS / 'navigation_shared.npz'
 EXAMPLES = DATA_ROOT / 'examples'
 ENVIRONMENT = PROJECT_ROOT / 'environment'
 

@@ -1,0 +1,209 @@
+{
+  "passed": true,
+  "scope": "Runtime and data validation before distribution packaging",
+  "date": "2026-10-10",
+  "python_related_tests": 62,
+  "python_additional_startup_tests": 3,
+  "python_total": 65,
+  "ui_tests": 18,
+  "native": true,
+  "real_simulator_launcher_restart": true,
+  "vehicles": [
+    "Drone1",
+    "BlackDrone"
+  ],
+  "external_camera": "ReplayCamera",
+  "entries": {
+    "static": {
+      "batch": "data\\records\\static_regression\\20261010_040934_140077500",
+      "outcomes": [
+        "reached",
+        "reached"
+      ],
+      "same_initial_map_hash": true,
+      "same_start": true,
+      "shared_paths": [
+        "D:\\Data\\VS_code\\ITS\\CompetitionEnv\\NavigationPhase1\\data\\maps\\navigation_shared.npz",
+        "D:\\Data\\VS_code\\ITS\\CompetitionEnv\\NavigationPhase1\\data\\maps\\navigation_shared.npz"
+      ],
+      "new_per_run_maps": []
+    },
+    "fly_cmd": {
+      "run": "data\\records\\example_runs\\safe5_diagonal_flight_2\\20261010_041128_331304800",
+      "outcome": "reached",
+      "source_example": null,
+      "load_source": "D:\\Data\\VS_code\\ITS\\CompetitionEnv\\NavigationPhase1\\data\\maps\\navigation_shared.npz",
+      "new_per_run_maps": []
+    },
+    "examples": true,
+    "http_library_available": true
+  },
+  "cohorts": {
+    "chase_baseline_20261010": [
+      {
+        "strategy": "latency",
+        "valid_runs": 6,
+        "captured": 6,
+        "mean_capture_sim_seconds": 28.580109696000005,
+        "pursuer_collisions": 0
+      },
+      {
+        "strategy": "predict",
+        "valid_runs": 6,
+        "captured": 6,
+        "mean_capture_sim_seconds": 31.720176682666665,
+        "pursuer_collisions": 0
+      },
+      {
+        "strategy": "pure",
+        "valid_runs": 6,
+        "captured": 5,
+        "mean_capture_sim_seconds": 38.5508224,
+        "pursuer_collisions": 0
+      }
+    ],
+    "chase_optimized_20261010": [
+      {
+        "strategy": "latency",
+        "valid_runs": 6,
+        "captured": 6,
+        "mean_capture_sim_seconds": 25.702548309333334,
+        "pursuer_collisions": 0
+      },
+      {
+        "strategy": "predict",
+        "valid_runs": 6,
+        "captured": 6,
+        "mean_capture_sim_seconds": 25.620546560000005,
+        "pursuer_collisions": 0
+      },
+      {
+        "strategy": "pure",
+        "valid_runs": 6,
+        "captured": 5,
+        "mean_capture_sim_seconds": 31.428070451200007,
+        "pursuer_collisions": 0
+      }
+    ],
+    "chase_delay_20261010": [
+      {
+        "strategy": "predict",
+        "valid_runs": 6,
+        "captured": 6,
+        "mean_capture_sim_seconds": 27.970596693333338,
+        "pursuer_collisions": 0
+      }
+    ],
+    "chase_fast_20261010": [
+      {
+        "strategy": "predict",
+        "valid_runs": 6,
+        "captured": 5,
+        "mean_capture_sim_seconds": 24.416320870400003,
+        "pursuer_collisions": 0
+      }
+    ],
+    "chase_fast_alignment_20261010": [
+      {
+        "strategy": "predict",
+        "valid_runs": 2,
+        "captured": 2,
+        "mean_capture_sim_seconds": 41.262880256,
+        "pursuer_collisions": 0
+      }
+    ],
+    "chase_final_20261010": [
+      {
+        "strategy": "predict",
+        "valid_runs": 6,
+        "captured": 6,
+        "mean_capture_sim_seconds": 26.186558634666667,
+        "pursuer_collisions": 0
+      }
+    ]
+  },
+  "shared_map": {
+    "path": "data/maps/navigation_shared.npz",
+    "sha256": "a01ff3c6611d93d9ccb8679c8f060fd88b4fa88344ed7cd39f1d6753ac28f5da",
+    "stats": {
+      "n_blocks": 881,
+      "n_occupied": 76156,
+      "res": 0.8,
+      "block": 16,
+      "origin": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "new_per_run_npz": []
+  },
+  "actual_browser": {
+    "passed": true,
+    "unified_default_entrypoint": true,
+    "default_cloud_with_scene_switch": true,
+    "real_mouse_orbit": true,
+    "right_button_pan": true,
+    "wheel_zoom": true,
+    "camera_persists_during_playback": true,
+    "reset_button": true,
+    "presets": [
+      "top",
+      "overview",
+      "follow",
+      "pair_top"
+    ],
+    "paused_seconds": 12,
+    "before_frame": 43,
+    "orbit_frame": 45,
+    "adjusted": {
+      "azimuth": -0.9600000000000002,
+      "elevation": -0.27,
+      "zoom": 0.6872892787909722,
+      "pan": [
+        -0.105,
+        0.0525
+      ]
+    },
+    "errors": [],
+    "dual_drone_target_frames": 643,
+    "python_tests": 65,
+    "ui_tests": 18
+  },
+  "actual_model_poses": {
+    "passed": true,
+    "actual": {
+      "pursuer": [
+        35.953529357910156,
+        31.008108139038086,
+        -11.983352661132812
+      ],
+      "target": [
+        67.61405181884766,
+        57.524070739746094,
+        -11.07912826538086
+      ]
+    },
+    "world_offset": [
+      0,
+      0,
+      0.14649677276611328
+    ],
+    "errors": {
+      "pursuer": 1.8148123631305818e-06,
+      "target": 2.6538409120965152e-06
+    }
+  },
+  "http_latest_recording": {
+    "id": "bd9937bd714f3340",
+    "counts": {
+      "states": 801,
+      "targets": 402,
+      "plans": 18,
+      "maps": 143
+    },
+    "complete": true
+  },
+  "archived_diagnostic_items": 34,
+  "archived_files_sha256_verified": 1573
+}

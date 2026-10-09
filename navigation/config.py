@@ -129,10 +129,13 @@ class Config:
 
     # ---- 持久建图 Persistent Map（方案书 §4–§7/§16–§17/§59/§61） ----
     use_persistent_map: bool = True           # 是否启用持久图先验加载与写回；False = 回到第一阶段行为
-    persistent_res: float = 0.6               # 持久图体素边长 r_G，米。必须是 res(0.2) 的整数倍（保证坐标对齐）
+    persistent_res: float = 0.8               # 共享地图统一分辨率，必须是局部 res 的整数倍
     persistent_block: int = 16                # 稀疏块边长（体素数），§5
     persistent_origin: tuple = (0.0, 0.0, 0.0)  # 单一世界锚点（NED），索引可为负
-    persistent_map_path: str = "data/maps/persistent_map.npz"  # 相对 NavigationPhase1 目录
+    persistent_map_path: str = "data/maps/navigation_shared.npz"  # 统一观测库
+    load_persistent_map: bool = True          # 仅控制规划先验，不控制观测保存
+    persistent_seed_path: str = ""           # 可选只读初始快照，仍合并到共享观测库
+    persistent_accumulate: bool = True       # 所有新观测合并保存，禁止空图覆盖
     persistent_save_interval: float = 5.0     # 落盘间隔（秒）；任务结束必落盘
     persistent_integrate_interval: float = 1.0  # 全向建图周期（秒）：把整帧点云未裁剪地写进持久图（§54）
 

@@ -12,7 +12,7 @@ import uuid
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from navigation.paths import PROJECT_ROOT, EXAMPLES, RECORDS, project_path
+from navigation.paths import PROJECT_ROOT, EXAMPLES, RECORDS, SHARED_MAP, project_path
 ROOT = PROJECT_ROOT
 
 
@@ -26,14 +26,18 @@ def select_case(entries, choice):
 
 
 def prepare_scenario(entry, args, root=EXAMPLES):
-    from experiments.experiment import file_hash
-    folder = Path(root) / entry['directory']
     scenario = json.loads((Path(root) / entry['scenario']).read_text(encoding='utf-8'))
     cfg = scenario['config']
-    cfg['log_dir'] = str(Path(args.output_dir).resolve() / entry['id'])
-    cfg['persistent_map_path'] = str((folder / 'initial_map.npz').resolve())
-    if entry['flight'] == 2 and file_hash(cfg['persistent_map_path']) != entry['initial_map_sha256']:
-        raise ValueError('复飞初始地图缺失或校验失败，拒绝使用不同的先验地图')
+    cfg['log_dir'] = str(project_path(args.output_dir) / entry['id'])
+    cfg['use_persistent_map']=True
+    cfg['persistent_map_path'] = str(SHARED_MAP)
+    load=getattr(args,'load_map',None)
+    if load is None:load=entry['flight']==2
+    cfg['persistent_seed_path'] = ''
+    cfg['load_persistent_map'] = bool(load)
+    cfg['persistent_accumulate'] = True
+    scenario['map_policy']='snapshot' if load else 'cold'
+    scenario['source_example_initial_map_sha256']=entry['initial_map_sha256']
     if args.ip is not None: cfg['ip'] = args.ip
     if args.port is not None: cfg['port'] = args.port
     scenario['example_id'] = entry['id']
@@ -67,7 +71,9 @@ def run_case(entry, args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description='选择 24 个验证案例，在已开启的模拟器中重新飞行并实时保存新记录')
     parser.add_argument('--case', help='案例编号 1–24 或完整案例 ID；未指定时显示选择菜单')
-    parser.add_argument('--repeat', type=int, default=1, help='同一案例连续重飞次数（每次恢复原始先验）')
+    parser.add_argument('--repeat', type=int, default=1, help='同一案例连续重飞次数（每次恢复批次相同先验）')
+    parser.add_argument('--load-map',action=argparse.BooleanOptionalAction,default=None,
+                        help='加载统一地图；默认首飞 cold，复飞使用批次开始时的共享地图')
     parser.add_argument('--list', action='store_true', help='只列出案例，不连接模拟器')
     parser.add_argument('--dry-run', action='store_true', help='显示实际使用的场景参数，不连接模拟器')
     parser.add_argument('--output-dir', default=str(RECORDS / 'example_runs'))

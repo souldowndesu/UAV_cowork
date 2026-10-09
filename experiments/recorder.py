@@ -11,7 +11,7 @@ from collections import deque,OrderedDict
 from pathlib import Path
 import numpy as np
 
-STREAMS=('states','points','plans','maps')
+STREAMS=('states','points','plans','maps','targets')
 
 def _timestamp(value):
     try:
@@ -108,6 +108,14 @@ class Recorder:
         a=_array(pts)
         if len(a)>self.max_points: a=a[np.linspace(0,len(a)-1,self.max_points,dtype=int)]
         self._append('points',dict(t=t,pts=a.ravel()))
+    def record_target(self,t,state,**diagnostics):
+        t=_timestamp(t)
+        if t is None:return
+        body=dict(t=t,p=_vec(state.position),v=_vec(state.velocity),a=_vec(state.acceleration),
+                  yaw=float(state.yaw),pitch=float(state.pitch),roll=float(state.roll),
+                  sim_timestamp_ns=int(state.timestamp_ns),collision=bool(state.collision))
+        body.update(_jsonable(diagnostics))
+        self._append('targets',body)
     def record_map(self,t,occ,unk=None):
         t = _timestamp(t)
         if t is None: return
@@ -147,7 +155,7 @@ class Recorder:
             geometry=next((e for e in reversed(self.events) if 'shape' in e and 'origin' in e),None)
         st=latest['states']; pt=latest['points']
         return _jsonable(dict(empty=st is None,goal=self.goal,map_size=self.map_size,state=st,
-            point=pt,pts=pt['pts'] if pt else [],plan=latest['plans'],map=latest['maps'],geometry=geometry))
+            point=pt,pts=pt['pts'] if pt else [],plan=latest['plans'],map=latest['maps'],geometry=geometry,target=latest['targets']))
     def _writer(self):
         batch=[]; last=time.monotonic(); map_previous=None; map_count=0
         try:
@@ -261,7 +269,7 @@ def load_recording_dict(path):
                 for key in ('persistent','persistent_unknown','persistent_bbox'):
                     data[key]=body[key]
     for k in STREAMS:
-        if len(data[k])!=meta['counts'][k]: raise ValueError('manifest count mismatch')
+        if len(data[k])!=meta['counts'].get(k,0): raise ValueError('manifest count mismatch')
     return data
 
 def scan_recordings(root_dir):
@@ -275,7 +283,7 @@ def read_meta(path,root_dir=None):
     p=Path(path)
     if p.name=='manifest.json':
         m=json.loads(p.read_text(encoding='utf-8'))
-        meta=dict(goal=m['goal'],t0=m['t0'],t1=m['t1'],complete=m['complete'],**{'n_'+k:m['counts'][k] for k in STREAMS})
+        meta=dict(goal=m['goal'],t0=m['t0'],t1=m['t1'],complete=m['complete'],**{'n_'+k:m['counts'].get(k,0) for k in STREAMS})
     else:
         # Legacy recording.json: use the small meta.json sidecar (written by
         # Recorder.save) instead of parsing the full multi-MB recording, so a
