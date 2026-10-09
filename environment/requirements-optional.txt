@@ -1,0 +1,4 @@
+# Optional plots, rebuilding native kernels, and development tests.
+matplotlib==3.10.9
+pybind11==3.1.0
+pytest>=7,<9

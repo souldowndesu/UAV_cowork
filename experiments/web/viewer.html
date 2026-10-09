@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<title>导航三维回放</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3; --dim:#8b949e; --acc:#58a6ff; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+              font-family:"Segoe UI",system-ui,-apple-system,sans-serif; overflow:hidden; }
+  #app { display:flex; flex-direction:column; height:100%; }
+  #toolbar { display:flex; align-items:center; gap:10px; padding:8px 12px;
+             background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap; flex-shrink:0; }
+  #toolbar .title { font-weight:600; font-size:14px; color:var(--acc); }
+  #hud { display:flex; gap:18px; padding:6px 12px; background:#0d1117;
+         border-bottom:1px solid var(--line); font:12px/1.5 "Consolas",monospace; flex-wrap:wrap; flex-shrink:0; }
+  #hud b { color:var(--acc); font-weight:600; }
+  #hud .dim { color:var(--dim); }
+  #stage { flex:1; position:relative; background:var(--bg); min-height:0; }
+  #stage canvas { position:absolute; inset:0; width:100%; height:100%; display:block; cursor:grab; }
+  #stage canvas.dragging { cursor:grabbing; }
+  #simImage { width:100%; height:100%; object-fit:contain; display:none; cursor:grab;
+              user-select:none; touch-action:none; }
+  #simImage.dragging { cursor:grabbing; }
+  button:disabled, select:disabled { opacity:.5; cursor:default; }
+  button:focus-visible, select:focus-visible, #simImage:focus-visible { outline:2px solid var(--acc); outline-offset:2px; }
+  #simMessage { position:absolute; inset:0; display:none; align-items:center; justify-content:center;
+                color:var(--dim); padding:28px; text-align:center; background:var(--bg); }
+  #stage .tag { position:absolute; top:6px; left:8px; z-index:2; font-size:11px; color:var(--dim);
+                background:rgba(13,17,23,.7); padding:2px 7px; border-radius:4px; pointer-events:none; }
+  #timeline { display:flex; align-items:center; gap:10px; padding:8px 12px;
+              background:var(--panel); border-top:1px solid var(--line); flex-shrink:0; }
+  #timeline input[type=range] { flex:1; }
+  #tlabel { font:12px "Consolas",monospace; color:var(--dim); white-space:nowrap; min-width:130px; }
+  button, select { background:#21262d; color:var(--fg); border:1px solid var(--line);
+                   border-radius:6px; padding:4px 10px; font-size:12px; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  button.active { background:var(--acc); color:#04121f; border-color:var(--acc); }
+  .legend { display:flex; gap:10px; font-size:11px; color:var(--dim); align-items:center; }
+  .legend .sw { display:inline-block; width:12px; height:12px; border-radius:2px; vertical-align:-2px; margin-right:4px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <label style="display:block;padding:6px 12px;background:var(--panel);border-bottom:1px solid var(--line);flex-shrink:0;"><input id="overview" type="checkbox">最终历史总览（可能包含当前回放时刻之后的信息）</label>
+  <div id="toolbar">
+    <span class="title">导航三维回放 <span style="color:var(--dim);font-weight:400;">(v3-单视图)</span></span>
+    <button id="btnLive" class="active">实时</button>
+    <button id="btnReplay">回放</button>
+    <select id="selCollection" aria-label="录像栏目" title="选择录像栏目"><option value="results">运行记录</option></select>
+    <select id="selRec" aria-label="选择录制" title="选择录制" style="max-width:480px;"><option value="">录制…</option></select>
+    <button id="btnRefresh" title="重新扫描">↻</button>
+    <button id="btnPlay">▶ 播放</button>
+    <label style="font-size:12px;"><input id="simEnabled" type="checkbox" disabled>模拟器场景</label>
+    <select id="simView" aria-label="场景相机" disabled><option value="follow">跟随无人机</option><option value="top">俯视</option><option value="overview">整条路线</option></select>
+    <button id="btnSimReset" disabled title="恢复当前预设视角；也可双击画面">重置视角</button>
+    <span id="simStatus" style="color:var(--dim);font-size:11px;"></span>
+    <select id="selSpeed">
+      <option value="0.25">0.25×</option><option value="0.5">0.5×</option>
+      <option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option>
+    </select>
+    <span class="legend">
+      <span><span class="sw" style="background:#58a6ff"></span>实际轨迹</span>
+      <span><span class="sw" style="background:#ffa657"></span>A* 路径</span>
+      <span><span class="sw" style="background:#7ee787"></span>B-spline 轨迹</span>
+      <span><span class="sw" style="background:#ff7b72"></span>目标</span>
+      <span><span class="sw" style="background:#ff5050"></span>占据</span>
+      <span><span class="sw" style="background:#4dd0e1"></span>持久地图</span>
+      <span><span class="sw" style="background:#888"></span>未观测(unknown)</span>
+      <span><span class="sw" style="background:#78beff"></span>规划/感知范围</span>
+    </span>
+    <span class="legend" title="地图显示范围（世界系 NED，留空=不限）" style="gap:4px;">
+      <span>范围</span>
+      <input id="bXmin" type="number" step="1" style="width:48px" title="X 最小(北)"><b>~</b><input id="bXmax" type="number" step="1" style="width:48px" title="X 最大(北)">
+      <input id="bYmin" type="number" step="1" style="width:48px" title="Y 最小(东)"><b>~</b><input id="bYmax" type="number" step="1" style="width:48px" title="Y 最大(东)">
+      <input id="bZmin" type="number" step="1" style="width:48px" title="Z 最小(下)"><b>~</b><input id="bZmax" type="number" step="1" style="width:48px" title="Z 最大(下)">
+      <button id="btnRangeApply" title="按输入范围裁剪地图">裁剪</button>
+      <button id="btnRangeAuto" title="自动=轨迹感知区">自动</button>
+      <button id="btnRangeReset" title="显示全部地图">全部</button>
+    </span>
+    <span id="status" style="color:var(--dim);font-size:11px;">连接中…</span>
+  </div>
+  <div id="hud">
+    <span>位置 <b id="hPos">-</b></span>
+    <span>实际速度 <b id="hVel">-</b> <span class="dim">|v|=</span><b id="hVmag">-</b></span>
+    <span>巡航参考 <b id="hReference">-</b></span>
+    <span>速度指令 <b id="hCommand">-</b></span>
+    <span title="路线与停车走廊估计值；弯道和终点还会进一步减速，实际速度可能滞后或超调">安全限速 <b id="hLimit">-</b></span>
+    <span>加速度 <b id="hAcc">-</b></span>
+    <span class="dim">目标距离</span> <b id="hGoalDist">-</b>
+    <span class="dim">接近点距离</span> <b id="hApproachDist">-</b>
+  </div>
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <img id="simImage" alt="AirSim 建筑、无人机和录制轨迹的场景画面" draggable="false" tabindex="0"
+         aria-label="场景相机：拖动旋转，Shift 或右键拖动平移，滚轮缩放；方向键旋转，加减号缩放，R 重置">
+    <div id="simMessage" role="status"></div>
+    <span class="tag" id="viewTag">点云 + 路径（左键旋转 · Shift/右键平移 · 滚轮缩放，绕无人机）</span>
+  </div>
+  <div id="timeline">
+    <span id="tlabel">0.0s / 0.0s</span>
+    <input type="range" id="scrub" min="0" max="1000" value="0" step="1">
+  </div>
+</div>
+
+<script>
+let geometry=[],showOverview=false;
+document.getElementById("overview").onchange=e=>{showOverview=e.target.checked;};
+
+"use strict";
+/* ============================ 数据 ============================ */
+let states = [];      // {t, p:[x,y,z], v:[..], a:[..], yaw}
+let points = [];      // {t, pts:[x1,y1,z1,...]}
+let plans  = [];      // {t, goal, path:[[..]], traj:[[..]], ctrl:[[..]]}
+let maps   = [];      // {t, occ:[x1,y1,z1,...]}
+let persistent = [];  // [x1,y1,z1,...] 持久地图 occupied 快照（任务结束一次性建模结果，已按范围裁剪）
+let persistentUnknown = [];  // [x1,y1,z1,...] 持久地图 unknown 快照（灰色未观测区，free 不标记）
+let fullPersistent = [];       // 原始未裁剪 occupied（applyRecording 时缓存，供范围裁剪）
+let fullPersistentUnknown = []; // 原始未裁剪 unknown
+let rangeBbox = null;          // [xmin,xmax,ymin,ymax,zmin,zmax] 当前裁剪范围（null=不限）
+let goal   = null;
+let mapSize = [40, 40, 10]; // 米，规划范围(=局部体素图 x/y/z)，感知框尺寸（无录制信息时回退默认）
+let t0 = 0, tEnd = 0;
+let curT = 0, playing = false, speed = 1.0, mode = "live";
+let liveTimer = null;
+
+/* ============================ 相机（绕无人机 + 平移） ============================ */
+// 世界 NED (x北,y东,z下) -> 显示坐标 (X东, Y上, Z北)
+function w2d(p){ return [p[1], -p[2], p[0]]; }
+// cam.pan 为相对无人机的平移偏移（显示坐标）
+const cam = { yaw: -0.9, pitch: 0.45, dist: 45, pan: [0, 0, 0] };
+
+function camCenter(){
+  const st = lerpState(curT);
+  const base = st ? w2d(st.p) : (goal ? w2d(goal) : [0,0,0]);
+  return [base[0]+cam.pan[0], base[1]+cam.pan[1], base[2]+cam.pan[2]];
+}
+function camProject(pd, w, h){
+  const c = camCenter();
+  const x = pd[0]-c[0], y = pd[1]-c[1], z = pd[2]-c[2];
+  const cy=Math.cos(cam.yaw), sy=Math.sin(cam.yaw);
+  const x1 = x*cy + z*sy, z1 = -x*sy + z*cy;
+  const cp=Math.cos(cam.pitch), sp=Math.sin(cam.pitch);
+  const y2 = y*cp - z1*sp, z2 = y*sp + z1*cp + cam.dist;
+  if (z2 <= 0.05) return null;
+  const f = Math.min(w,h) * 1.1;
+  return [w/2 + f*x1/z2, h/2 - f*y2/z2];
+}
+
+function heightColor(alt){  // alt = -z = 高度(米)
+  const t = Math.max(0, Math.min(1, (alt + 2) / 22));
+  const r = Math.round(40 + t*215), g = Math.round(120 + (1-t)*120), b = Math.round(255 - t*180);
+  return `rgb(${r},${g},${b})`;
+}
+
+/* ============================ 取数（按时间） ============================ */
+function lerpState(t){
+  if (!states.length) return null;
+  if (t <= states[0].t) return states[0];
+  if (t >= states[states.length-1].t) return states[states.length-1];
+  let lo=0, hi=states.length-1;
+  while (hi-lo>1){ const m=(lo+hi)>>1; if(states[m].t<=t) lo=m; else hi=m; }
+  const A=states[lo], B=states[hi], f=(t-A.t)/Math.max(1e-6,B.t-A.t);
+  const L=(a,b)=>[a[0]+(b[0]-a[0])*f, a[1]+(b[1]-a[1])*f, a[2]+(b[2]-a[2])*f];
+  return { ...A, t, p:L(A.p,B.p), v:L(A.v,B.v), a:L(A.a,B.a), yaw:A.yaw };
+}
+function latestIdx(arr, t){
+  let lo=0, hi=arr.length-1, ans=-1;
+  while(lo<=hi){ const m=(lo+hi)>>1; if(arr[m].t<=t){ans=m;lo=m+1;} else hi=m-1; }
+  return ans;
+}
+function trailUpTo(t){ const out=[]; for(const s of states){ if(s.t<=t) out.push(s.p); } return out; }
+
+/* ============================ 绘制（单视图） ============================ */
+function clearCv(){
+  const cv=document.getElementById("cv"); const dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth, h=cv.clientHeight;
+  if (cv.width!==w*dpr || cv.height!==h*dpr){ cv.width=w*dpr; cv.height=h*dpr; }
+  const ctx=cv.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.fillStyle="#0d1117"; ctx.fillRect(0,0,w,h); return {ctx,w,h};
+}
+function drawPoints(ctx,w,h,ptsFlat){
+  const n = ptsFlat.length/3;
+  for(let i=0;i<n;i++){
+    const s = camProject(w2d([ptsFlat[i*3],ptsFlat[i*3+1],ptsFlat[i*3+2]]), w, h);
+    if(!s) continue;
+    ctx.fillStyle = heightColor(-ptsFlat[i*3+2]);
+    ctx.fillRect(s[0],s[1],1.4,1.4);
+  }
+}
+function polyline(ctx,w,h,pts,color,lw){
+  ctx.strokeStyle=color; ctx.lineWidth=lw; ctx.beginPath();
+  let started=false;
+  for(const p of pts){ const s=camProject(w2d(p),w,h); if(!s) continue;
+    if(!started){ctx.moveTo(s[0],s[1]);started=true;} else ctx.lineTo(s[0],s[1]); }
+  ctx.stroke();
+}
+function drawGoal(ctx,w,h,g,color="#ff7b72"){
+  const s=camProject(w2d(g),w,h); if(!s) return;
+  ctx.strokeStyle=color; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(s[0]-8,s[1]); ctx.lineTo(s[0]+8,s[1]);
+  ctx.moveTo(s[0],s[1]-8); ctx.lineTo(s[0],s[1]+8); ctx.stroke();
+}
+function drawFlat(ctx,w,h,flat,color,size){
+  const n = flat.length/3;
+  ctx.fillStyle=color;
+  for(let i=0;i<n;i++){
+    const s = camProject(w2d([flat[i*3],flat[i*3+1],flat[i*3+2]]), w, h);
+    if(!s) continue;
+    ctx.fillRect(s[0]-size/2, s[1]-size/2, size, size);
+  }
+}
+// 无人机感知/规划框：以当前无人机位置为中心、mapSize 为边长的线框长方体。
+// 该范围 = 局部体素图（A*/规划域）；超出此范围，即便被 LiDAR 探测到也不用于规划，等同未知。
+function drawPerceptionFrame(ctx,w,h){
+  const idx=latestIdx(geometry,curT); if(idx<0) return;
+  const g=geometry[idx];
+  function box(pad,color){
+    const lo=g.origin.map((v,i)=>v-(i<2?pad:0));
+    const hi=g.origin.map((v,i)=>v+g.shape[i]*g.res+(i<2?pad:0));
+    ctx.strokeStyle=color; ctx.lineWidth=1;
+    for(let axis=0;axis<3;axis++) for(let u=0;u<2;u++) for(let v=0;v<2;v++){
+      const a=lo.slice(),b=lo.slice(),others=[0,1,2].filter(i=>i!==axis);
+      a[others[0]]=b[others[0]]=u?hi[others[0]]:lo[others[0]];
+      a[others[1]]=b[others[1]]=v?hi[others[1]]:lo[others[1]]; b[axis]=hi[axis];
+      const x=camProject(w2d(a),w,h),y=camProject(w2d(b),w,h);
+      if(x&&y){ctx.beginPath();ctx.moveTo(...x);ctx.lineTo(...y);ctx.stroke();}
+    }
+  }
+  box(0,'rgba(120,190,255,.6)'); box(g.plan_pad||0,'rgba(255,166,87,.4)');
+}
+
+function render(){
+  if(simulatorEnabled && mode==='replay'){updateHUD();return;}
+  const {ctx,w,h}=clearCv();
+  // 占据图：仅 occupied(红)（真实命中）；unknown 不再填图层，改用感知框表示探测范围
+  const mi=latestIdx(maps, curT);
+  if(mi>=0){
+    const mp=maps[mi];
+    // 感知区 unknown（灰，逐帧）：raw 图里 mark_visible_free 后仍未观测到的区域（遮挡后方等）
+    if(mp.unk && mp.unk.length) drawFlat(ctx,w,h, mp.unk, "rgba(136,136,136,0.35)", 2);
+    if(mp.occ && mp.occ.length) drawFlat(ctx,w,h, mp.occ, "rgba(255,80,80,0.8)", 4);
+  }
+  // 持久地图 unknown（灰色，兼容旧录制）：新版 unknown 已改为逐帧 maps.unk，这里通常为空
+  if(showOverview && persistentUnknown && persistentUnknown.length) drawFlat(ctx,w,h, persistentUnknown, "rgba(136,136,136,0.35)", 2);
+  // 持久地图：任务结束时的建模结果（历史累积障碍，浅青），常驻显示
+  if(showOverview && persistent && persistent.length) drawFlat(ctx,w,h, persistent, "rgba(77,208,225,0.45)", 3);
+  // 无人机感知框（探测范围球）
+  drawPerceptionFrame(ctx,w,h);
+  // 点云
+  const si=latestIdx(points, curT);
+  if(si>=0) drawPoints(ctx,w,h, points[si].pts);
+  // 实际轨迹
+  polyline(ctx,w,h, trailUpTo(curT), "#58a6ff", 2);
+  // A* 路径 + B-spline
+  const pi=latestIdx(plans, curT);
+  if(pi>=0){
+    const pl=plans[pi];
+    if(pl.path.length) polyline(ctx,w,h, pl.path, "#ffa657", 1.5);
+    if(pl.traj.length) polyline(ctx,w,h, pl.traj, "#7ee787", 2.5);
+    if(pl.ctrl.length){ ctx.fillStyle="#7ee787"; for(const c of pl.ctrl){
+      const s=camProject(w2d(c),w,h); if(s) ctx.fillRect(s[0]-2.5,s[1]-2.5,5,5); } }
+  }
+  if(goal) drawGoal(ctx,w,h, goal);
+  // 无人机当前位置
+  const st=lerpState(curT); if(st){
+    if(st.approach_goal) drawGoal(ctx,w,h,st.approach_goal,"#79c0ff");
+    const s=camProject(w2d(st.p),w,h);
+    if(s){ ctx.fillStyle="#fff"; ctx.beginPath(); ctx.arc(s[0],s[1],5,0,Math.PI*2); ctx.fill(); } }
+  updateHUD();
+}
+
+/* ============================ HUD ============================ */
+function updateHUD(){
+  const st=lerpState(curT);
+  const fmt=(a)=> a? a.map(x=>x.toFixed(2)).join(", ") : "-";
+  const speed=(value)=>Number.isFinite(value)?value.toFixed(2)+" m/s":"-";
+  document.getElementById("hReference").textContent=speed(st?.reference_speed);
+  document.getElementById("hCommand").textContent=speed(st?.u?Math.hypot(...st.u):undefined);
+  document.getElementById("hLimit").textContent=speed(st?.speed_limit);
+  document.getElementById("hApproachDist").textContent=st?.approach_goal?
+    Math.hypot(...st.p.map((v,i)=>v-st.approach_goal[i])).toFixed(2)+" m":"-";
+  if(st){
+    document.getElementById("hPos").textContent = fmt(st.p);
+    document.getElementById("hVel").textContent = fmt(st.v);
+    document.getElementById("hVmag").textContent = Math.hypot(...st.v).toFixed(2)+" m/s";
+    document.getElementById("hAcc").textContent = fmt(st.a);
+  }
+  if(goal && st){
+    const dx=st.p[0]-goal[0], dy=st.p[1]-goal[1], dz=st.p[2]-goal[2];
+    document.getElementById("hGoalDist").textContent = Math.hypot(dx,dy,dz).toFixed(2)+" m";
+  }
+  document.getElementById("tlabel").textContent =
+    `${(curT-t0).toFixed(1)}s / ${(tEnd-t0).toFixed(1)}s (${timelineClock})`;
+}
+
+/* ============================ 时间轴 ============================ */
+const scrub = document.getElementById("scrub");
+function refreshRange(){
+  if(!states.length){ t0=tEnd=0; } else { t0=states[0].t; tEnd=Math.max(states[states.length-1].t, t0+0.001); }
+  curT=Math.min(Math.max(curT,t0),tEnd);
+}
+function scrubToTime(){ curT = t0 + (+scrub.value/1000)*(tEnd-t0); }
+
+/* ============================ 循环 ============================ */
+let last=performance.now();
+function frame(now){
+  const dt=(now-last)/1000; last=now;
+  if(playing){ curT += dt*speed; if(curT>=tEnd){curT=tEnd; playing=false; setPlay(false);} }
+  if(mode==="replay") scrub.value = Math.round((curT-t0)/Math.max(1e-6,tEnd-t0)*1000);
+  render();
+  syncSimulator(now);
+  requestAnimationFrame(frame);
+}
+function setPlay(on){
+  playing=on; document.getElementById("btnPlay").textContent = on? "⏸ 暂停":"▶ 播放";
+  document.getElementById("btnPlay").classList.toggle("active", on);
+}
+
+/* ============================ 实时 / 回放 ============================ */
+let libraryMode = false;
+let timelineClock = '墙钟时间';
+let replayGeneration = 0;
+let libraryGeneration = 0;
+let simulatorAvailable=false, simulatorEnabled=false, simulatorPending=false;
+let simulatorRecordingId=null, simulatorSequence=0, simulatorLastSend=-Infinity, simulatorLastImage=0;
+const simulatorClient='page-'+Date.now()+'-'+Math.random().toString(36).slice(2);
+let simulatorCamera={azimuth:0,elevation:0,zoom:1,pan:[0,0]};
+function resetSimulatorCamera(){
+  simulatorCamera={azimuth:0,elevation:0,zoom:1,pan:[0,0]};simulatorLastSend=-Infinity;
+}
+function moveSimulatorCamera(dx,dy,pan=false){
+  if(pan){
+    simulatorCamera.pan[0]=Math.max(-10,Math.min(10,simulatorCamera.pan[0]-dx*.0015));
+    simulatorCamera.pan[1]=Math.max(-10,Math.min(10,simulatorCamera.pan[1]+dy*.0015));
+  }else{
+    simulatorCamera.azimuth=Math.atan2(Math.sin(simulatorCamera.azimuth-dx*.006),Math.cos(simulatorCamera.azimuth-dx*.006));
+    // Saturate at the preset's poles, so dragging back responds immediately.
+    const view=document.getElementById('simView').value;
+    const base=view==='top'?Math.atan2(35,.1):view==='overview'?Math.atan2(1,Math.SQRT2):Math.atan2(7,13);
+    simulatorCamera.elevation=Math.max(-85*Math.PI/180-base,
+      Math.min(89.9*Math.PI/180-base,simulatorCamera.elevation+dy*.006));
+  }
+  simulatorLastSend=-Infinity;
+}
+function zoomSimulatorCamera(delta){
+  simulatorCamera.zoom=Math.max(.15,Math.min(20,simulatorCamera.zoom*Math.exp(Math.max(-1000,Math.min(1000,delta))*.0015)));
+  simulatorLastSend=-Infinity;
+}
+function simulatorDisplay(message='等待模拟器画面…'){
+  const enabled=simulatorEnabled && mode==='replay';
+  document.getElementById('cv').style.display=enabled?'none':'';
+  document.getElementById('simImage').style.display=enabled && simulatorLastImage?'block':'none';
+  document.getElementById('simMessage').style.display=enabled && !simulatorLastImage?'flex':'none';
+  document.getElementById('simMessage').textContent=message;
+  document.getElementById('viewTag').textContent=enabled?'AirSim 场景 · 左键旋转 · Shift/右键平移 · 滚轮缩放 · 双击重置':
+    '点云 + 路径（左键旋转 · Shift/右键平移 · 滚轮缩放，绕无人机）';
+  for(const id of ['overview','bXmin','bXmax','bYmin','bYmax','bZmin','bZmax','btnRangeApply','btnRangeAuto','btnRangeReset']){
+    document.getElementById(id).disabled=enabled;
+  }
+  document.getElementById('simView').disabled=!simulatorAvailable || !simulatorEnabled;
+  document.getElementById('btnSimReset').disabled=!enabled;
+}
+async function simulatorRequest(payload){
+  const response=await fetch('/api/simulator',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({...payload,client:simulatorClient,sequence:++simulatorSequence})});
+  const result=await response.json();
+  if(!response.ok)throw new Error(result.error || `HTTP ${response.status}`);
+  return result;
+}
+function releaseSimulator(){
+  simulatorLastImage=0;
+  if(simulatorAvailable && simulatorEnabled)simulatorRequest({enabled:false}).catch(e=>{
+    document.getElementById('simStatus').textContent=e.message;
+  });
+}
+async function syncSimulator(now){
+  if(!simulatorEnabled || !simulatorAvailable || mode!=='replay' || !simulatorRecordingId ||
+      !states.length || simulatorPending || now-simulatorLastSend<80)return;
+  simulatorPending=true;simulatorLastSend=now;
+  const identity=simulatorRecordingId;
+  try{
+    const status=await simulatorRequest({enabled:true,recording_id:identity,seconds:curT-t0,
+      view:document.getElementById('simView').value || 'follow',camera:simulatorCamera});
+    if(!simulatorEnabled || mode!=='replay' || identity!==simulatorRecordingId)return;
+    document.getElementById('simStatus').textContent=status.error || status.camera_error ||
+      (status.enabled?`场景 ${Number(status.seconds || 0).toFixed(1)}s`:'连接模拟器…');
+    if(status.frame_available && status.recording_id===identity && status.frame_sequence!==simulatorLastImage){
+      const image=document.getElementById('simImage');
+      image.onload=()=>{if(simulatorEnabled && identity===simulatorRecordingId){simulatorLastImage=status.frame_sequence;simulatorDisplay();}};
+      image.src='/api/simulator/frame.jpg?sequence='+status.frame_sequence;
+    }
+    if(!simulatorLastImage)simulatorDisplay(status.error || status.camera_error || '加载场景画面…');
+  }catch(e){document.getElementById('simStatus').textContent=e.message;simulatorDisplay(e.message);}
+  finally{simulatorPending=false;}
+}
+async function fetchJSON(url){
+  const response=await fetch(url);
+  const data=await response.json();
+  if(!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+function beginReplay(){
+  releaseSimulator();simulatorRecordingId=null;
+  resetSimulatorCamera();
+  mode='replay'; ++liveGeneration;
+  simulatorDisplay();
+  clearTimeout(liveTimer); liveTimer=null;
+  return ++replayGeneration;
+}
+async function loadStatus(){
+  try{
+    const r=await fetch("/api/status").then(x=>x.json());
+    libraryMode = !!r.library;
+    simulatorAvailable=!!r.simulator;simulatorEnabled=simulatorAvailable && !!r.simulator_default;
+    document.getElementById('simEnabled').disabled=!simulatorAvailable;
+    document.getElementById('simEnabled').checked=simulatorEnabled;
+    document.getElementById('simView').disabled=!simulatorAvailable;
+    document.getElementById('simEnabled').title=simulatorAvailable?'同步录制状态到模拟器':'运行 replay.py 启用场景回放，不要使用 --no-simulator';
+    let s = `实时:${r.live? "有":"无"}`;
+    if(r.library) s += `  录制库:${r.recordings} 条`;
+    else if(r.replay) s += `  单段回放`;
+    document.getElementById("status").textContent = s;
+    if(r.live) startLive();
+    if(r.library) await refreshRecordings(!r.live);
+    else if(r.replay) await loadSingleReplay();
+  }catch(e){
+    document.getElementById("status").textContent = "无法连接服务器："+e.message;
+    console.error(e);
+  }
+}
+async function refreshRecordings(load=true){
+  const generation=++libraryGeneration;
+  try{
+    const all=await fetchJSON("/api/recordings");
+    if(generation!==libraryGeneration)return;
+    const category=document.getElementById('selCollection');
+    const collection=category.value || 'results';
+    const groups=new Map([['results','运行记录']]);
+    all.forEach(m=>groups.set(m.collection || 'results',m.collection_name || '运行记录'));
+    category.innerHTML='';
+    groups.forEach((label,id)=>{
+      const o=document.createElement('option');o.value=id;
+      o.textContent=`${label} (${all.filter(m=>(m.collection || 'results')===id).length})`;
+      category.appendChild(o);
+    });
+    category.value=groups.has(collection)?collection:'results';
+    const list=all.filter(m=>(m.collection || 'results')===category.value);
+    if(category.value==='examples')list.sort((a,b)=>(a.example_order || 0)-(b.example_order || 0));
+    const sel=document.getElementById("selRec");
+    const selected=sel.value;
+    sel.innerHTML="";
+    if(!list.length){
+      if(load){beginReplay();applyRecording({states:[]});}
+      const o=document.createElement("option"); o.value=""; o.textContent="无录制";
+      sel.appendChild(o);
+      document.getElementById("status").textContent="当前栏目没有录制；可切换栏目或运行飞行程序";
+      return;
+    }
+    list.forEach((m,i)=>{
+      const dur=(m.t1!=null&&m.t0!=null)?(m.t1-m.t0).toFixed(1)+"s":"?";
+      const g=m.goal? m.goal.map(x=>Math.round(x)).join(","):"?";
+      const o=document.createElement("option"); o.value=m.id || String(i);
+      o.disabled=!!m.error;
+      const name=m.display_name || m.name;
+      o.textContent=m.error?`${name}  读取失败`:`${name}  目标[${g}] ${dur}  ${m.n_states}帧${m.complete===false?'  未完整结束':''}`;
+      sel.appendChild(o);
+    });
+    const usable=list.filter(m=>!m.error);
+    if(!usable.length){if(load){beginReplay();applyRecording({states:[]});}document.getElementById("status").textContent="录制元信息均无法读取"; return;}
+    sel.value=usable.some(m=>m.id===selected)?selected:(usable[0].id || String(list.indexOf(usable[0])));
+    document.getElementById("status").textContent=`已列出 ${list.length} 条录制，加载中…`;
+    if(load) await loadRecordingById(sel.value);
+  }catch(e){
+    document.getElementById("status").textContent="加载录制列表失败："+e.message;
+    console.error(e);
+  }
+}
+async function loadRecordingById(i){
+  const generation=beginReplay();
+  document.getElementById("status").textContent=`加载录制 #${i} 中…`;
+  try{
+    const r=await fetchJSON("/api/recording?id="+encodeURIComponent(i));
+    if(generation===replayGeneration && mode==='replay'){applyRecording(r);simulatorRecordingId=String(i);simulatorDisplay();}
+  }catch(e){
+    if(generation!==replayGeneration || mode!=='replay')return;
+    document.getElementById("status").textContent="加载录制失败："+e.message;
+    console.error(e);
+  }
+}
+async function loadSingleReplay(){
+  const generation=beginReplay();
+  try{
+    const r=await fetchJSON("/api/recording");
+    if(generation===replayGeneration && mode==='replay')applyRecording(r);
+  }catch(e){
+    if(generation!==replayGeneration || mode!=='replay')return;
+    document.getElementById("status").textContent="加载录制失败："+e.message;
+    console.error(e);
+  }
+}
+function simulationClockRecording(recording){
+  const anchors=recording.states||[];
+  if(anchors.length<2 || anchors.some((s,i)=>!Number.isFinite(s.t)||!Number.isFinite(s.sim_timestamp_ns)||
+      (i>0 && (s.t<=anchors[i-1].t || s.sim_timestamp_ns<anchors[i-1].sim_timestamp_ns)))) return recording;
+  const first=anchors[0],last=anchors[anchors.length-1];
+  if(last.sim_timestamp_ns<=first.sim_timestamp_ns) return recording;
+  const simTime=(s)=>first.t+(s.sim_timestamp_ns-first.sim_timestamp_ns)*1e-9;
+  function convert(t){
+    let lo=0,hi=anchors.length-1;
+    while(hi-lo>1){const mid=(lo+hi)>>1;if(anchors[mid].t<=t)lo=mid;else hi=mid;}
+    const a=anchors[lo],b=anchors[hi];
+    return simTime(a)+(simTime(b)-simTime(a))*(t-a.t)/(b.t-a.t);
+  }
+  const result={...recording,clock:'simulation'};
+  for(const stream of ['states','points','plans','maps','geometry','outcomes','guides','exploration']){
+    if(recording[stream]) result[stream]=recording[stream].map(event=>Number.isFinite(event.t)?
+      {...event,wall_t:event.t,t:stream==='states'?simTime(event):convert(event.t)}:event);
+  }
+  return result;
+}
+function applyRecording(r){
+  if(r.empty){ document.getElementById("status").textContent="无录制数据"; return; }
+  r=simulationClockRecording(r);
+  timelineClock=r.clock==='simulation'?'仿真时间':'墙钟时间';
+  goal=r.goal||null;
+  if(r.map_size) mapSize=r.map_size;
+  geometry=r.geometry||[]; states=r.states||[]; points=r.points||[]; plans=r.plans||[]; maps=r.maps||[];
+  for(const stream of [geometry,states,points,plans,maps])stream.sort((a,b)=>a.t-b.t || (a.seq||0)-(b.seq||0));
+  fullPersistent=r.persistent||[];
+  fullPersistentUnknown=r.persistent_unknown||[];
+  if(r.persistent_bbox && r.persistent_bbox.length===6) applyRange(r.persistent_bbox);
+  else resetRange();
+  refreshRange(); curT=t0; setPlay(false);
+  document.getElementById("btnReplay").classList.add("active");
+  document.getElementById("btnLive").classList.remove("active");
+  clearTimeout(liveTimer); liveTimer=null; mode="replay";
+  document.getElementById("status").textContent =
+    `回放：${states.length} 帧 / ${points.length} 点云 / ${plans.length} 重规划${r.complete===false?' / 录制未完整结束':''}`;
+}
+
+/* ============================ 地图范围裁剪 ============================ */
+function filterFlat(flat, bbox){
+  if(!bbox || bbox.length!==6) return flat;
+  const [xmin,xmax,ymin,ymax,zmin,zmax]=bbox;
+  const out=[];
+  for(let i=0;i+2<flat.length;i+=3){
+    const x=flat[i], y=flat[i+1], z=flat[i+2];
+    if(x>=xmin && x<=xmax && y>=ymin && y<=ymax && z>=zmin && z<=zmax) out.push(x,y,z);
+  }
+  return out;
+}
+function setRangeInputs(bbox){
+  const ids=["bXmin","bXmax","bYmin","bYmax","bZmin","bZmax"];
+  if(bbox && bbox.length===6){ bbox.forEach((v,i)=>{ document.getElementById(ids[i]).value=Math.round(v); }); }
+  else ids.forEach(id=>{ document.getElementById(id).value=""; });
+}
+function applyRange(bbox){
+  if(!bbox || bbox.length!==6) return;
+  rangeBbox=bbox;
+  persistent=filterFlat(fullPersistent, bbox);
+  persistentUnknown=filterFlat(fullPersistentUnknown, bbox);
+  setRangeInputs(bbox);
+  document.getElementById("status").textContent=
+    `范围裁剪：occupied ${persistent.length/3} / unknown ${persistentUnknown.length/3} 点`;
+}
+function resetRange(){
+  rangeBbox=null;
+  persistent=fullPersistent;
+  persistentUnknown=fullPersistentUnknown;
+  setRangeInputs(null);
+  document.getElementById("status").textContent=
+    `全量：occupied ${persistent.length/3} / unknown ${persistentUnknown.length/3} 点`;
+}
+function autoRange(){
+  if(!states.length){ resetRange(); return; }
+  let xmin=Infinity,xmax=-Infinity,ymin=Infinity,ymax=-Infinity,zmin=Infinity,zmax=-Infinity;
+  for(const s of states){ const p=s.p;
+    xmin=Math.min(xmin,p[0]); xmax=Math.max(xmax,p[0]);
+    ymin=Math.min(ymin,p[1]); ymax=Math.max(ymax,p[1]);
+    zmin=Math.min(zmin,p[2]); zmax=Math.max(zmax,p[2]);
+  }
+  applyRange([xmin-mapSize[0]/2, xmax+mapSize[0]/2,
+              ymin-mapSize[1]/2, ymax+mapSize[1]/2,
+              zmin-mapSize[2]/2, zmax+mapSize[2]/2]);
+}
+let liveSeen={},liveGeneration=0;
+function appendLive(f){
+  if(f.empty) return;
+  if(f.goal) goal=f.goal; if(f.map_size) mapSize=f.map_size;
+  for(const [key,list,value] of [['state',states,f.state],['point',points,f.point],['plan',plans,f.plan],['map',maps,f.map],['geometry',geometry,f.geometry]]){
+    if(!value) continue; const id=value.seq??value.t;
+    if(liveSeen[key]===id) continue; liveSeen[key]=id;
+    list.push(value); if(list.length>2000) list.splice(0,list.length-2000);
+  }
+  refreshRange(); if(mode==='live'&&!playing)curT=tEnd;
+}
+function startLive(){
+  releaseSimulator();simulatorRecordingId=null;
+  ++replayGeneration;
+  timelineClock='墙钟时间';
+  mode='live'; const generation=++liveGeneration; liveSeen={};
+  simulatorDisplay();
+  states=[]; points=[]; plans=[]; maps=[]; geometry=[];
+  fullPersistent=[]; fullPersistentUnknown=[]; persistent=[]; persistentUnknown=[];
+  goal=null; rangeBbox=null; setRangeInputs(null); setPlay(false);
+  document.getElementById('btnLive').classList.add('active');
+  document.getElementById('btnReplay').classList.remove('active');
+  clearTimeout(liveTimer);
+  async function poll(){
+    try { const f=await fetch('/api/live').then(r=>r.json()); if(mode==='live'&&generation===liveGeneration)appendLive(f); } catch(e){}
+    if(mode==='live'&&generation===liveGeneration)liveTimer=setTimeout(poll,150);
+    else if(generation===liveGeneration)liveTimer=null;
+  }
+  poll();
+}
+
+/* ============================ 相机交互 ============================ */
+function bindCamera(){
+  const cv=document.getElementById("cv");
+  let drag=null, lx=0, ly=0;
+  cv.addEventListener("mousedown",e=>{
+    drag = (e.shiftKey || e.button===2) ? "pan" : "orbit";
+    lx=e.clientX; ly=e.clientY; cv.classList.add("dragging");
+  });
+  cv.addEventListener("contextmenu",e=>e.preventDefault());
+  window.addEventListener("mouseup",()=>{ drag=null; cv.classList.remove("dragging"); });
+  window.addEventListener("mousemove",e=>{
+    if(!drag) return;
+    const dx=e.clientX-lx, dy=e.clientY-ly; lx=e.clientX; ly=e.clientY;
+    if(drag==="orbit"){
+      cam.yaw += dx*0.006; cam.pitch += dy*0.006;
+      cam.pitch=Math.max(-1.4,Math.min(1.4,cam.pitch));
+    }else{
+      const s = cam.dist*0.003;
+      cam.pan[0] -= dx*s;   // 水平 → 东
+      cam.pan[1] += dy*s;   // 垂直 → 上
+    }
+  });
+  cv.addEventListener("wheel",e=>{ e.preventDefault();
+    cam.dist*=Math.pow(1.0015,e.deltaY); cam.dist=Math.max(3,Math.min(300,cam.dist));
+  },{passive:false});
+}
+
+function bindSimulatorCamera(){
+  const image=document.getElementById('simImage');
+  let drag=null;
+  image.addEventListener('pointerdown',e=>{
+    if(!simulatorEnabled || mode!=='replay' || ![0,2].includes(e.button))return;
+    e.preventDefault();image.focus();image.setPointerCapture(e.pointerId);
+    drag={id:e.pointerId,x:e.clientX,y:e.clientY,pan:e.shiftKey || e.button===2};
+    image.classList.add('dragging');
+  });
+  image.addEventListener('pointermove',e=>{
+    if(!drag || e.pointerId!==drag.id)return;
+    if(!simulatorEnabled || mode!=='replay')return;
+    moveSimulatorCamera(e.clientX-drag.x,e.clientY-drag.y,drag.pan || e.shiftKey);
+    drag.x=e.clientX;drag.y=e.clientY;
+  });
+  const end=e=>{if(drag && e.pointerId===drag.id){drag=null;image.classList.remove('dragging');}};
+  for(const event of ['pointerup','pointercancel','lostpointercapture'])image.addEventListener(event,end);
+  image.addEventListener('contextmenu',e=>e.preventDefault());
+  image.addEventListener('wheel',e=>{
+    if(!simulatorEnabled || mode!=='replay')return;
+    e.preventDefault();zoomSimulatorCamera(e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?image.clientHeight:1));
+  },{passive:false});
+  image.addEventListener('dblclick',resetSimulatorCamera);
+  image.addEventListener('keydown',e=>{
+    if(!simulatorEnabled || mode!=='replay')return;
+    const movement={ArrowLeft:[-12,0],ArrowRight:[12,0],ArrowUp:[0,-12],ArrowDown:[0,12]}[e.key];
+    if(movement)moveSimulatorCamera(...movement,e.shiftKey);
+    else if(e.key==='+' || e.key==='=')zoomSimulatorCamera(-100);
+    else if(e.key==='-')zoomSimulatorCamera(100);
+    else if(e.key.toLowerCase()==='r')resetSimulatorCamera();
+    else return;
+    e.preventDefault();
+  });
+}
+
+/* ============================ 交互 ============================ */
+document.getElementById("btnLive").onclick = startLive;
+document.getElementById("btnReplay").onclick = ()=>{ if(libraryMode) refreshRecordings(); else loadSingleReplay(); };
+document.getElementById("btnRefresh").onclick = refreshRecordings;
+document.getElementById("selRec").onchange = e=>{ loadRecordingById(e.target.value); };
+document.getElementById('selCollection').onchange = ()=>{beginReplay();setPlay(false);refreshRecordings();};
+document.getElementById('simEnabled').onchange = e=>{
+  if(!e.target.checked)releaseSimulator();
+  simulatorEnabled=!!e.target.checked && simulatorAvailable;
+  simulatorLastImage=0;simulatorLastSend=-Infinity;simulatorDisplay();
+};
+document.getElementById('simView').onchange = resetSimulatorCamera;
+document.getElementById('btnSimReset').onclick = resetSimulatorCamera;
+window.addEventListener('pagehide',()=>{
+  if(simulatorAvailable && simulatorEnabled)fetch('/api/simulator',{method:'POST',keepalive:true,
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:false,client:simulatorClient,sequence:++simulatorSequence})}).catch(()=>{});
+});
+document.getElementById("btnPlay").onclick = ()=>{ setPlay(!playing); };
+document.getElementById("selSpeed").onchange = e=>{ speed=+e.target.value; };
+scrub.oninput = ()=>{ if(mode==="replay"){ scrubToTime(); setPlay(false); } };
+document.getElementById("btnRangeApply").onclick = ()=>{
+  const get=id=>{ const v=parseFloat(document.getElementById(id).value); return Number.isFinite(v)?v:null; };
+  const b=[get("bXmin"),get("bXmax"),get("bYmin"),get("bYmax"),get("bZmin"),get("bZmax")];
+  if(b.some(v=>v===null)){ document.getElementById("status").textContent="范围输入不完整（6 个都填，或点「自动」）"; return; }
+  if(b[0]>b[1]||b[2]>b[3]||b[4]>b[5]){ document.getElementById("status").textContent="范围最小须 ≤ 最大"; return; }
+  applyRange(b);
+};
+document.getElementById("btnRangeAuto").onclick = autoRange;
+document.getElementById("btnRangeReset").onclick = resetRange;
+
+bindCamera();
+bindSimulatorCamera();
+
+/* ============================ 启动 ============================ */
+requestAnimationFrame(frame);
+loadStatus();
+</script>
+</body>
+</html>

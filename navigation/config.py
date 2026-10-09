@@ -1,0 +1,212 @@
+# -*- coding: utf-8 -*-
+"""第一阶段集中配置。
+
+所有可调参数集中于此，``scene_test.py`` 可用命令行参数覆盖。默认值取自方案书 §67
+的推荐初始参数，其余（代价、B-spline 权重、动力学上限）按 §21/§24/§31–§35 给定。
+
+坐标约定：全程 AirSim NED 世界系（+X 北 / +Y 东 / +Z 向下，向上飞 = z 减小）。
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field, asdict
+
+
+@dataclass
+class Config:
+    navigation_mode: str = "legacy"          # safe_route enables validated spatial spline following
+    jerk_max: float = 8.0
+    map_stale_timeout: float = 1.5
+    route_replan_distance: float = 14.0
+    safe_shortcuts: bool = False
+    fast_history: bool = False
+    route_buffer: float = 0.0
+    curve_accel_limit: float = 0.0
+    flight_altitude_min: float = 0.0
+    flight_altitude_max: float = 0.0
+    allow_safe_approach: bool = False
+    approach_max_distance: float = 0.0       # 0 disables task proximity bound; positive limits accepted approach candidates
+    goal_occupied_confirmed: bool = False
+    goal_in_building_confirmed: bool = False
+    goal_brake_reaction: float = 0.7
+    use_world_guide: bool = False
+    guide_res: float = 1.6
+    guide_margin: float = 35.0
+    guide_interval: float = 2.0
+    guide_lookahead: float = 28.0
+    guide_clearance: float = 0.8
+    guide_altitude_min: float = 5.0
+    guide_altitude_max: float = 50.0
+    guide_altitude_cost: float = 0.0
+    predictive_braking: bool = False
+    brake_reaction: float = 0.65
+    brake_accel: float = 2.0
+    velocity_safety_guard: bool = False
+    brake_margin: float = 0.6
+    persistent_full_sensor: bool = False
+    progress_exploration: bool = False
+    explore_timeout: float = 18.0
+    explore_height_step: float = 18.0
+    # ---- 局部体素图（§10/§67） ----
+    map_size: tuple = (40.0, 40.0, 10.0)      # (x, y, z) 米，NED 轴
+    map_back_x: float = 10.0                  # 无人机在 X 方向距地图后端的距离（米）；前向余量 = map_size[0]-map_back_x
+    res: float = 0.2                          # 体素边长 r_L，米
+    plan_res: float = 0.4                     # 粗路径 A* 的分辨率（§7/§24 粗网格，提速）
+    d_max: float = 6.0                        # 截断距离场上限（§18/§67），必须 ≥ d_safe 使 φ(D) 能归零
+    d_safe: float = 5.0                       # 障碍安全距离（§20/§67），软代价 ψ(D) 生效阈值（5m 安全距离）
+    drone_radius: float = 0.3                 # 无人机物理半径，米（对建筑做固定膨胀，保证机身余量）
+    d_min: float = 0.8                        # 硬净空阈值，米（相对已膨胀障碍；A*/B-spline 硬约束）
+    max_range: float = 30.0                   # LiDAR 最大感知距离，米（§54），与地图前向余量对齐
+    self_echo_dist: float = 0.3               # 射线投射自回波过滤最小距离（滤掉载具自身，米）
+
+    # ---- LiDAR 角分辨率（用于距离相关的传感器脚印膨胀） ----
+    lidar_dtheta_h_deg: float = 1.89          # 水平角分辨率（度），=360·通道·RPS/PPS
+    lidar_dtheta_v_deg: float = 1.89          # 垂直角分辨率（度），=180/(通道数-1)，96 通道均衡
+
+    # ---- 成本场（§21/§22/§67） ----
+    c_free: float = 1.0
+    c_unknown: float = 5.0                    # 仅剩"障碍物背后的真·未观测区"才标 Unknown，保持昂贵
+    w_obs: float = 1.0                        # 距离场障碍代价权重（φ 已含指数幅值，w_obs=1 使 5m→0/2m→19）
+    w_hard: float = 100.0                     # B-spline 硬净空 barrier 权重（净空 < d_min 时二次惩罚，优化内硬约束）
+
+    # ---- A*（§24） ----
+    astar_timeout_nodes: int = 1500000        # 展开节点上限（粗图 pad 后 ~176×176×25=774k 体素，启发式低估时搜索前沿覆盖整图，须≥整图）
+    h_weight: float = 1.0                     # 启发式权重。必须 ≤ c_free(=1.0) 才可采纳/一致；
+                                              # 曾设 5.0 使 A* 贪心，中和了障碍距离惩罚（贴墙走最短路径），
+                                              # 降到 1.0 让距离惩罚真正生效（避让更安全路径）。
+    w_dir: float = 6.0                        # A* 起点速度方向引导权重（§24 补充）：起点节点邻居方向与
+                                              # 当前速度夹角越大、边代价附加 w_dir*(1-cosθ)*res。让 A* 起步
+                                              # 沿速度方向延伸而非垂直起步（消除大幅摆动/脱离路线）。
+    plan_pad: float = 15.0                    # 可规划范围 x/y 每边比感知范围多出的缓冲（米）。绕楼在水平面，
+                                              # x/y 外圈补 UNKNOWN（代价高但可达），让 goal 在 occupied 后方
+                                              # （UNKNOWN）时仍能被投影/A* 朝它探索，主动探索未知区而非"缺乏
+                                              # 目标"原地徘徊（用户 m04144/m04146）。不扩大建图范围。
+    plan_pad_z: float = 0.0                   # z 方向额外缓冲（米）。绕楼是水平绕行、不需要垂直探索，z 不扩
+                                              # 以减少粗图体素（避免各向同性 pad 让 nz 从 25 膨胀到 85、A* 搜索
+                                              # 前沿爆炸耗尽节点上限）。
+
+    # ---- B-spline（§29–§35） ----
+    bspline_order: int = 3                    # 三次
+    bspline_n_ctrl: int = 20                  # 控制点下界（短路径用）
+    bspline_ctrl_spacing: float = 1.2         # 控制点弧长间距（米），决定贴合 A* 航点的密度：
+                                              # 越小越贴合（保留拐角、不拉直绕行），越大越平滑
+    bspline_max_ctrl: int = 60                # 控制点数量上限（长路径自适应的封顶，防优化过慢）
+    w_goal: float = 1.0
+    w_smooth: float = 0.2                     # 平滑权重（降低，只润滑拐角、不抹平折线）
+    w_dyn: float = 0.4
+    bspline_iters: int = 30                   # 每轮优化迭代
+    bspline_step: float = 0.08                # 梯度步长
+    splice_margin: float = 0.1                # 拼接点前移时间（秒），覆盖规划延迟
+    smooth_skip: int = 2                      # 平滑/加速度代价跳过起点附近几个差分项（允许起点加速）
+
+    # ---- 动力学 / 控制（§35/§44） ----
+    v_mission: float = 3.5                    # 任务巡航速度，m/s
+    v_max: float = 6.0                        # 载具速度上限，m/s
+    a_max: float = 2.0                        # 加速度上限，m/s^2
+    kp: float = 1.2                           # 轨迹跟踪位置增益
+    kd: float = 1.0                           # 轨迹跟踪速度增益
+    control_dt: float = 0.02                  # 控制周期，秒（50Hz）
+    velocity_duration: float = 1.0            # moveByVelocityZAsync 指令保持时长（须>控制周期，否则指令过期速度归零）
+    goal_tol: float = 1.0                     # 到达判据，米
+
+    # ---- 线程频率（§52） ----
+    sensor_hz: float = 5.0                     # LiDAR 点云反序列化慢，降低频率避免饿死控制环
+    mapping_hz: float = 10.0
+    planning_hz: float = 10.0
+    control_hz: float = 50.0
+    replan_fraction: float = 0.333            # 当前轨迹执行满该比例才重规划（1/3：运行 1/3 预测轨迹后就更新，
+                                              # 使规划及时跟上速度/环境变化，避免轨迹过时导致摆动/撞墙）
+
+    # ---- 仿真连接 ----
+    ip: str = "127.0.0.1"
+    port: int = 41451
+    vehicle_name: str = ""                    # 空串 = 默认载具
+    lidar_name: str = "Lidar1"                # 对应 settings.json 里的 Lidar1；未配置时自动回退深度图
+    camera_name: str = "0"                    # 深度回退用的前中相机
+
+    # ---- 起飞 / 降落 ----
+    takeoff_altitude: float = 3.0             # 起飞后离地高度，米
+    flight_altitude: float = 8.0              # 目标巡航高度（NED：发送时取负），米
+
+    # ---- 持久建图 Persistent Map（方案书 §4–§7/§16–§17/§59/§61） ----
+    use_persistent_map: bool = True           # 是否启用持久图先验加载与写回；False = 回到第一阶段行为
+    persistent_res: float = 0.6               # 持久图体素边长 r_G，米。必须是 res(0.2) 的整数倍（保证坐标对齐）
+    persistent_block: int = 16                # 稀疏块边长（体素数），§5
+    persistent_origin: tuple = (0.0, 0.0, 0.0)  # 单一世界锚点（NED），索引可为负
+    persistent_map_path: str = "data/maps/persistent_map.npz"  # 相对 NavigationPhase1 目录
+    persistent_save_interval: float = 5.0     # 落盘间隔（秒）；任务结束必落盘
+    persistent_integrate_interval: float = 1.0  # 全向建图周期（秒）：把整帧点云未裁剪地写进持久图（§54）
+
+    # ---- 杂项 ----
+    seed: int = 0
+    log_dir: str = "data/records"
+
+    def __post_init__(self):
+        self.map_size = tuple(float(v) for v in self.map_size)
+        self.res = float(self.res)
+        self.nx = int(round(self.map_size[0] / self.res))
+        self.ny = int(round(self.map_size[1] / self.res))
+        self.nz = int(round(self.map_size[2] / self.res))
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d.pop("nx", None)
+        d.pop("ny", None)
+        d.pop("nz", None)
+        return d
+
+    @classmethod
+    def from_overrides(cls, overrides: dict) -> "Config":
+        c = cls()
+        for k, v in (overrides or {}).items():
+            if not hasattr(c, k):
+                raise ValueError(f"未知参数: {k}")
+            setattr(c, k, v)
+        c.__post_init__()
+        return c
+
+
+def parse_overrides(argv) -> dict:
+    """把 ``--key value``（可带 ``--key=value``）解析成 dict，值做类型推断。"""
+    overrides = {}
+    i = 0
+    args = list(argv)
+    while i < len(args):
+        a = args[i]
+        if a.startswith("--"):
+            key = a[2:]
+            if "=" in key:
+                key, val = key.split("=", 1)
+                i += 1
+            else:
+                if i + 1 >= len(args):
+                    raise ValueError(f'参数 {a} 缺少值')
+                val = args[i + 1]
+                i += 2
+            overrides[key.replace('-', '_')] = _coerce(val)
+        else:
+            raise ValueError(f'无法识别参数: {a}')
+    return overrides
+
+
+def _coerce(val: str):
+    s = val.strip()
+    if s == "":
+        return s
+    # 元组 / 列表
+    if s.startswith(("(", "[")) and s.endswith((")", "]")):
+        inner = s[1:-1]
+        parts = [p.strip() for p in inner.split(",") if p.strip() != ""]
+        return tuple(_coerce(p) for p in parts)
+    low = s.lower()
+    if low in ("true", "yes"):
+        return True
+    if low in ("false", "no"):
+        return False
+    if low in ("none", "null"):
+        return None
+    try:
+        if "." in s or "e" in low or "e-" in low:
+            return float(s)
+        return int(s)
+    except ValueError:
+        return s

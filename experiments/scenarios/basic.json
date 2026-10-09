@@ -1,0 +1,17 @@
+{
+  "name": "basic",
+  "start": [
+    0,
+    0,
+    -0.5
+  ],
+  "start_yaw": 0,
+  "goal": [
+    40,
+    5,
+    -10
+  ],
+  "map_policy": "cold",
+  "max_duration": 240,
+  "config": {}
+}

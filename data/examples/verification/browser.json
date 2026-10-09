@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "category": "飞行示例 · 24 次验证 (24)",
+  "count": 24,
+  "selected": "22 · 8 m/s · 对角方向 · 复飞  目标[100,70,-20] 47.9s  925帧",
+  "goal": [
+    100,
+    70,
+    -20
+  ],
+  "states": 925,
+  "plans": 9,
+  "maps": 118,
+  "reference": "8.00 m/s",
+  "exceptions": []
+}

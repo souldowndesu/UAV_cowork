@@ -1,0 +1,20 @@
+{
+  "name": "building_safe_approach",
+  "start": [
+    0,
+    0,
+    -0.5
+  ],
+  "start_yaw": 0,
+  "goal": [
+    200,
+    20,
+    -20
+  ],
+  "map_policy": "cold",
+  "max_duration": 240,
+  "config": {
+    "goal_in_building_confirmed": true,
+    "goal_occupied_confirmed": true
+  }
+}

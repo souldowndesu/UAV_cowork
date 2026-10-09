@@ -1,0 +1,31 @@
+{
+  "passed": true,
+  "original_examples": 24,
+  "http_readable_reruns": 2,
+  "runs": [
+    {
+      "run": "results\\example_runs\\safe5_diagonal_flight_2\\20261003_193517_785456500\\run_00",
+      "outcome": "reached",
+      "final_error_m": 0.2680640861712328,
+      "collision": false,
+      "same_config": true,
+      "same_prior": true,
+      "same_start": true,
+      "same_goal": true,
+      "reset": true,
+      "passed": true
+    },
+    {
+      "run": "results\\example_runs\\safe5_diagonal_flight_2\\20261003_193517_785456500\\run_01",
+      "outcome": "reached",
+      "final_error_m": 0.5131691374634516,
+      "collision": false,
+      "same_config": true,
+      "same_prior": true,
+      "same_start": true,
+      "same_goal": true,
+      "reset": true,
+      "passed": true
+    }
+  ]
+}

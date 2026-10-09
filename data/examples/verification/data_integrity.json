@@ -1,0 +1,269 @@
+{
+  "passed": true,
+  "examples": [
+    {
+      "id": "safe5_negative_flight_1",
+      "preserved_files": 93,
+      "mismatches": [],
+      "complete": true,
+      "states": 1524,
+      "maps": 204,
+      "plans": 28,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe5_east_x_flight_1",
+      "preserved_files": 108,
+      "mismatches": [],
+      "complete": true,
+      "states": 1864,
+      "maps": 251,
+      "plans": 32,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe5_north_y_flight_1",
+      "preserved_files": 100,
+      "mismatches": [],
+      "complete": true,
+      "states": 1565,
+      "maps": 200,
+      "plans": 16,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe5_diagonal_flight_1",
+      "preserved_files": 69,
+      "mismatches": [],
+      "complete": true,
+      "states": 1164,
+      "maps": 160,
+      "plans": 10,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe5_west_x_flight_1",
+      "preserved_files": 135,
+      "mismatches": [],
+      "complete": true,
+      "states": 2344,
+      "maps": 313,
+      "plans": 27,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe5_south_y_flight_1",
+      "preserved_files": 116,
+      "mismatches": [],
+      "complete": true,
+      "states": 1954,
+      "maps": 260,
+      "plans": 25,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe5_negative_flight_2",
+      "preserved_files": 86,
+      "mismatches": [],
+      "complete": true,
+      "states": 1252,
+      "maps": 158,
+      "plans": 14,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe5_east_x_flight_2",
+      "preserved_files": 94,
+      "mismatches": [],
+      "complete": true,
+      "states": 1427,
+      "maps": 174,
+      "plans": 14,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe5_north_y_flight_2",
+      "preserved_files": 106,
+      "mismatches": [],
+      "complete": true,
+      "states": 1413,
+      "maps": 163,
+      "plans": 15,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe5_diagonal_flight_2",
+      "preserved_files": 68,
+      "mismatches": [],
+      "complete": true,
+      "states": 1051,
+      "maps": 130,
+      "plans": 9,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe5_west_x_flight_2",
+      "preserved_files": 107,
+      "mismatches": [],
+      "complete": true,
+      "states": 1597,
+      "maps": 192,
+      "plans": 17,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe5_south_y_flight_2",
+      "preserved_files": 109,
+      "mismatches": [],
+      "complete": true,
+      "states": 1620,
+      "maps": 203,
+      "plans": 16,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe8_negative_flight_1",
+      "preserved_files": 84,
+      "mismatches": [],
+      "complete": true,
+      "states": 1320,
+      "maps": 177,
+      "plans": 20,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe8_east_x_flight_1",
+      "preserved_files": 80,
+      "mismatches": [],
+      "complete": true,
+      "states": 1315,
+      "maps": 180,
+      "plans": 26,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe8_north_y_flight_1",
+      "preserved_files": 75,
+      "mismatches": [],
+      "complete": true,
+      "states": 1145,
+      "maps": 150,
+      "plans": 17,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe8_diagonal_flight_1",
+      "preserved_files": 58,
+      "mismatches": [],
+      "complete": true,
+      "states": 933,
+      "maps": 128,
+      "plans": 9,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe8_west_x_flight_1",
+      "preserved_files": 117,
+      "mismatches": [],
+      "complete": true,
+      "states": 1990,
+      "maps": 260,
+      "plans": 23,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe8_south_y_flight_1",
+      "preserved_files": 103,
+      "mismatches": [],
+      "complete": true,
+      "states": 1808,
+      "maps": 250,
+      "plans": 26,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe8_negative_flight_2",
+      "preserved_files": 71,
+      "mismatches": [],
+      "complete": true,
+      "states": 1081,
+      "maps": 139,
+      "plans": 14,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe8_east_x_flight_2",
+      "preserved_files": 84,
+      "mismatches": [],
+      "complete": true,
+      "states": 1315,
+      "maps": 174,
+      "plans": 14,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe8_north_y_flight_2",
+      "preserved_files": 79,
+      "mismatches": [],
+      "complete": true,
+      "states": 1184,
+      "maps": 146,
+      "plans": 14,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe8_diagonal_flight_2",
+      "preserved_files": 59,
+      "mismatches": [],
+      "complete": true,
+      "states": 925,
+      "maps": 118,
+      "plans": 9,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe8_west_x_flight_2",
+      "preserved_files": 100,
+      "mismatches": [],
+      "complete": true,
+      "states": 1607,
+      "maps": 209,
+      "plans": 17,
+      "initial_map_valid": true,
+      "passed": true
+    },
+    {
+      "id": "safe8_south_y_flight_2",
+      "preserved_files": 89,
+      "mismatches": [],
+      "complete": true,
+      "states": 1416,
+      "maps": 186,
+      "plans": 18,
+      "initial_map_valid": true,
+      "passed": true
+    }
+  ]
+}

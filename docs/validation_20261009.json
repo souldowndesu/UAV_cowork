@@ -1,0 +1,30 @@
+{
+  "passed": true,
+  "date": "2026-10-10",
+  "python_tests": 145,
+  "web_tests": 16,
+  "examples_verified": 24,
+  "rerun_config_checks": 24,
+  "recordings": 28,
+  "native": true,
+  "actual_http_replay": true,
+  "other_working_directory": true,
+  "fly_cmd": true,
+  "paths": {
+    "examples": "data/examples",
+    "records": "data/records",
+    "maps": "data/maps"
+  },
+  "note": "Offline directory-migration validation; this change does not alter navigation algorithms.",
+  "independent_receiver": {
+    "passed": true,
+    "independent_extraction": true,
+    "path_contains_spaces": true,
+    "fresh_offline_install": true,
+    "native": true,
+    "examples": 24,
+    "verified_files": 2648,
+    "fly_cmd": true
+  },
+  "additional_live_flight": false
+}

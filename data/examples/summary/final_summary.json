@@ -1,0 +1,663 @@
+{
+  "passed": true,
+  "complete_5_and_8_speed_levels": true,
+  "same_source_across_speeds": true,
+  "mission_source_matches_current": true,
+  "same_other_flight_config_per_goal_across_speeds": true,
+  "all_first_flights_cold": true,
+  "all_second_flights_snapshot": true,
+  "all_persistent_maps_enabled": true,
+  "same_requested_start_and_reset": true,
+  "max_preflight_position_delta_m": 0.008804559707646141,
+  "max_preflight_speed_mps": 0.0,
+  "stages": [
+    {
+      "stage": "paired_final_5",
+      "speed": 5.0,
+      "passed": true,
+      "pairs": [
+        {
+          "case": "negative",
+          "same_source": true,
+          "same_native_kernel": true,
+          "same_simulator_settings": true,
+          "same_flight_config": true,
+          "same_requested_start": true,
+          "first_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.6041183471679688
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791019482386198784
+          },
+          "second_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.6052587032318115
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791019912979384576
+          },
+          "first_quality_pass": true,
+          "second_quality_pass": true,
+          "exact_first_map_reused": true,
+          "first_sim_s": 52.807126528000005,
+          "second_sim_s": 46.38098944,
+          "first_wall_s": 85.73875522613525,
+          "second_wall_s": 76.95466494560242,
+          "first_path_m": 187.67921682825752,
+          "second_path_m": 184.67530193935139,
+          "first_original_distance_m": 15.75651735737097,
+          "second_original_distance_m": 14.710638872583056,
+          "first_endpoint_error_m": 0.9519464888606661,
+          "second_endpoint_error_m": 0.934159534103929,
+          "collision": false,
+          "minimum_raw_clearance_m": 3.485700461956591,
+          "minimum_inflated_clearance_m": 2.7014760892174454,
+          "maximum_stopped_away_s": 1.0816264152526855
+        },
+        {
+          "case": "east_x",
+          "same_source": true,
+          "same_native_kernel": true,
+          "same_simulator_settings": true,
+          "same_flight_config": true,
+          "same_requested_start": true,
+          "first_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.6069037914276123
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791019551498673152
+          },
+          "second_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.606924057006836
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791019973913684480
+          },
+          "first_quality_pass": true,
+          "second_quality_pass": true,
+          "exact_first_map_reused": true,
+          "first_sim_s": 63.451353600000004,
+          "second_sim_s": 49.30605184,
+          "first_wall_s": 101.40540742874146,
+          "second_wall_s": 85.76503992080688,
+          "first_path_m": 236.2611123508181,
+          "second_path_m": 193.94733671033907,
+          "first_original_distance_m": 33.12150585059451,
+          "second_original_distance_m": 33.43832711635357,
+          "first_endpoint_error_m": 0.697428443125786,
+          "second_endpoint_error_m": 0.8261996174024948,
+          "collision": false,
+          "minimum_raw_clearance_m": 3.55880960319851,
+          "minimum_inflated_clearance_m": 2.881103562940062,
+          "maximum_stopped_away_s": 0.8672957420349121
+        },
+        {
+          "case": "north_y",
+          "same_source": true,
+          "same_native_kernel": true,
+          "same_simulator_settings": true,
+          "same_flight_config": true,
+          "same_requested_start": true,
+          "first_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.6068835258483887
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791019632977411328
+          },
+          "second_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.6051570177078247
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791020038136054528
+          },
+          "first_quality_pass": true,
+          "second_quality_pass": true,
+          "exact_first_map_reused": true,
+          "first_sim_s": 48.859042304000006,
+          "second_sim_s": 52.798126336,
+          "first_wall_s": 92.20447874069214,
+          "second_wall_s": 98.02776885032654,
+          "first_path_m": 206.76051649564064,
+          "second_path_m": 206.58100513091117,
+          "first_original_distance_m": 0.9943391617522583,
+          "second_original_distance_m": 0.9913317198878424,
+          "first_endpoint_error_m": 0.9943391617522583,
+          "second_endpoint_error_m": 0.9913317198878424,
+          "collision": false,
+          "minimum_raw_clearance_m": 3.7222444328063595,
+          "minimum_inflated_clearance_m": 2.8745870580411474,
+          "maximum_stopped_away_s": 0.6169588565826416
+        },
+        {
+          "case": "diagonal",
+          "same_source": true,
+          "same_native_kernel": true,
+          "same_simulator_settings": true,
+          "same_flight_config": true,
+          "same_requested_start": true,
+          "first_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.6069445610046387
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791019696152759040
+          },
+          "second_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.6069445610046387
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791020104224464384
+          },
+          "first_quality_pass": true,
+          "second_quality_pass": true,
+          "exact_first_map_reused": true,
+          "first_sim_s": 30.777656576000002,
+          "second_sim_s": 29.127621376,
+          "first_wall_s": 60.52031445503235,
+          "second_wall_s": 57.872817516326904,
+          "first_path_m": 127.22783814086006,
+          "second_path_m": 124.82019050828993,
+          "first_original_distance_m": 0.4550088141812587,
+          "second_original_distance_m": 0.8574515465702075,
+          "first_endpoint_error_m": 0.4550088141812587,
+          "second_endpoint_error_m": 0.8574515465702075,
+          "collision": false,
+          "minimum_raw_clearance_m": 3.8999462544909367,
+          "minimum_inflated_clearance_m": 3.0557598731008273,
+          "maximum_stopped_away_s": 0.4075772762298584
+        },
+        {
+          "case": "west_x",
+          "same_source": true,
+          "same_native_kernel": true,
+          "same_simulator_settings": true,
+          "same_flight_config": true,
+          "same_requested_start": true,
+          "first_preflight_state": {
+            "position": [
+              8.940696183401542e-09,
+              0.0,
+              1.6036279201507568
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791019739917692672
+          },
+          "second_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.6057331562042236
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791020145646348032
+          },
+          "first_quality_pass": true,
+          "second_quality_pass": true,
+          "exact_first_map_reused": true,
+          "first_sim_s": 74.91159808,
+          "second_sim_s": 54.178155776000004,
+          "first_wall_s": 130.1408724784851,
+          "second_wall_s": 99.35161709785461,
+          "first_path_m": 271.47783093124565,
+          "second_path_m": 233.74127695873304,
+          "first_original_distance_m": 0.9873255794531142,
+          "second_original_distance_m": 0.6634881105586037,
+          "first_endpoint_error_m": 0.9873255794531142,
+          "second_endpoint_error_m": 0.6634881105586037,
+          "collision": false,
+          "minimum_raw_clearance_m": 3.5468833085594067,
+          "minimum_inflated_clearance_m": 2.698808742799714,
+          "maximum_stopped_away_s": 0.7525317668914795
+        },
+        {
+          "case": "south_y",
+          "same_source": true,
+          "same_native_kernel": true,
+          "same_simulator_settings": true,
+          "same_flight_config": true,
+          "same_requested_start": true,
+          "first_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.6036376953125
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791019830927634176
+          },
+          "second_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.6052587032318115
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791020213384793088
+          },
+          "first_quality_pass": true,
+          "second_quality_pass": true,
+          "exact_first_map_reused": true,
+          "first_sim_s": 66.439417344,
+          "second_sim_s": 54.706167040000004,
+          "first_wall_s": 110.4896833896637,
+          "second_wall_s": 100.51910018920898,
+          "first_path_m": 249.20020017757818,
+          "second_path_m": 227.63215464557416,
+          "first_original_distance_m": 0.9962575923963478,
+          "second_original_distance_m": 0.44097453436846895,
+          "first_endpoint_error_m": 0.9962575923963478,
+          "second_endpoint_error_m": 0.44097453436846895,
+          "collision": false,
+          "minimum_raw_clearance_m": 3.5312725684165516,
+          "minimum_inflated_clearance_m": 2.766433320727432,
+          "maximum_stopped_away_s": 0.757225751876831
+        }
+      ],
+      "min_inflated_clearance_m": 2.698808742799714,
+      "min_raw_clearance_m": 3.485700461956591,
+      "max_stopped_away_s": 1.0816264152526855,
+      "p90_speed_range_mps": [
+        4.851841296362361,
+        4.900762451659347
+      ],
+      "max_actual_speed_mps": 5.550430390724443,
+      "max_endpoint_error_m": 0.9962575923963478,
+      "navigation_sim_s_sum": 623.74330624,
+      "path_m_sum": 2450.003980817599
+    },
+    {
+      "stage": "paired_final_8",
+      "speed": 8.0,
+      "passed": true,
+      "pairs": [
+        {
+          "case": "negative",
+          "same_source": true,
+          "same_native_kernel": true,
+          "same_simulator_settings": true,
+          "same_flight_config": true,
+          "same_requested_start": true,
+          "first_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.608620285987854
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791018819945067008
+          },
+          "second_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.6041183471679688
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791019172932597248
+          },
+          "first_quality_pass": true,
+          "second_quality_pass": true,
+          "exact_first_map_reused": true,
+          "first_sim_s": 48.421032960000005,
+          "second_sim_s": 37.731804928,
+          "first_wall_s": 76.0735080242157,
+          "second_wall_s": 60.57918047904968,
+          "first_path_m": 189.00601786997902,
+          "second_path_m": 188.30192895200489,
+          "first_original_distance_m": 16.415178671753424,
+          "second_original_distance_m": 14.495962041078029,
+          "first_endpoint_error_m": 0.9071264648575744,
+          "second_endpoint_error_m": 0.9288744637055221,
+          "collision": false,
+          "minimum_raw_clearance_m": 3.5566218556491007,
+          "minimum_inflated_clearance_m": 2.8644644907355046,
+          "maximum_stopped_away_s": 1.0351922512054443
+        },
+        {
+          "case": "east_x",
+          "same_source": true,
+          "same_native_kernel": true,
+          "same_simulator_settings": true,
+          "same_flight_config": true,
+          "same_requested_start": true,
+          "first_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.6124324798583984
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791018883834429952
+          },
+          "second_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.6036382913589478
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791019224806703872
+          },
+          "first_quality_pass": true,
+          "second_quality_pass": true,
+          "exact_first_map_reused": true,
+          "first_sim_s": 37.833807104,
+          "second_sim_s": 38.442820096000005,
+          "first_wall_s": 72.63137125968933,
+          "second_wall_s": 73.70939207077026,
+          "first_path_m": 201.71717644502266,
+          "second_path_m": 200.79947140942053,
+          "first_original_distance_m": 30.67505551707977,
+          "second_original_distance_m": 29.70242851870363,
+          "first_endpoint_error_m": 0.7114666218468555,
+          "second_endpoint_error_m": 0.9680265804494974,
+          "collision": false,
+          "minimum_raw_clearance_m": 4.111919239024917,
+          "minimum_inflated_clearance_m": 3.311919219999584,
+          "maximum_stopped_away_s": 0.5729420185089111
+        },
+        {
+          "case": "north_y",
+          "same_source": true,
+          "same_native_kernel": true,
+          "same_simulator_settings": true,
+          "same_flight_config": true,
+          "same_requested_start": true,
+          "first_preflight_state": {
+            "position": [
+              8.940696183401542e-09,
+              0.0,
+              1.6057360172271729
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791018934994521344
+          },
+          "second_preflight_state": {
+            "position": [
+              8.940696183401542e-09,
+              0.0,
+              1.6057360172271729
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791019276314802688
+          },
+          "first_quality_pass": true,
+          "second_quality_pass": true,
+          "exact_first_map_reused": true,
+          "first_sim_s": 35.802763776,
+          "second_sim_s": 36.783784704000006,
+          "first_wall_s": 66.78132057189941,
+          "second_wall_s": 68.86461877822876,
+          "first_path_m": 212.01183964055298,
+          "second_path_m": 208.42195458175433,
+          "first_original_distance_m": 0.8471795815532823,
+          "second_original_distance_m": 0.9776439073147087,
+          "first_endpoint_error_m": 0.8471795815532823,
+          "second_endpoint_error_m": 0.9776439073147087,
+          "collision": false,
+          "minimum_raw_clearance_m": 3.9376084596210252,
+          "minimum_inflated_clearance_m": 3.080055531355696,
+          "maximum_stopped_away_s": 0.5150132179260254
+        },
+        {
+          "case": "diagonal",
+          "same_source": true,
+          "same_native_kernel": true,
+          "same_simulator_settings": true,
+          "same_flight_config": true,
+          "same_requested_start": true,
+          "first_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.6057331562042236
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791018984096568832
+          },
+          "second_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.6051570177078247
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791019326064864000
+          },
+          "first_quality_pass": true,
+          "second_quality_pass": true,
+          "exact_first_map_reused": true,
+          "first_sim_s": 24.987533056,
+          "second_sim_s": 23.865509120000002,
+          "first_wall_s": 48.614123821258545,
+          "second_wall_s": 47.91275763511658,
+          "first_path_m": 128.76141171572976,
+          "second_path_m": 125.75828741192065,
+          "first_original_distance_m": 0.5686966990998165,
+          "second_original_distance_m": 0.33432719834275315,
+          "first_endpoint_error_m": 0.5686966990998165,
+          "second_endpoint_error_m": 0.33432719834275315,
+          "collision": false,
+          "minimum_raw_clearance_m": 4.130556505202191,
+          "minimum_inflated_clearance_m": 3.27602244813061,
+          "maximum_stopped_away_s": 0.5138609409332275
+        },
+        {
+          "case": "west_x",
+          "same_source": true,
+          "same_native_kernel": true,
+          "same_simulator_settings": true,
+          "same_flight_config": true,
+          "same_requested_start": true,
+          "first_preflight_state": {
+            "position": [
+              8.940696183401542e-09,
+              0.0,
+              1.6057360172271729
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791019021501366784
+          },
+          "second_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.6036279201507568
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791019362098632704
+          },
+          "first_quality_pass": true,
+          "second_quality_pass": true,
+          "exact_first_map_reused": true,
+          "first_sim_s": 62.69233740800001,
+          "second_sim_s": 48.058025216000004,
+          "first_wall_s": 110.62054228782654,
+          "second_wall_s": 90.30874514579773,
+          "first_path_m": 267.70465167886834,
+          "second_path_m": 238.22211279664072,
+          "first_original_distance_m": 0.9888612576091232,
+          "second_original_distance_m": 0.9677356180537376,
+          "first_endpoint_error_m": 0.9888612576091232,
+          "second_endpoint_error_m": 0.9677356180537376,
+          "collision": false,
+          "minimum_raw_clearance_m": 3.530081065184434,
+          "minimum_inflated_clearance_m": 2.6372591030777266,
+          "maximum_stopped_away_s": 0.6330769062042236
+        },
+        {
+          "case": "south_y",
+          "same_source": true,
+          "same_native_kernel": true,
+          "same_simulator_settings": true,
+          "same_flight_config": true,
+          "same_requested_start": true,
+          "first_preflight_state": {
+            "position": [
+              0.0,
+              0.0,
+              1.6041183471679688
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791019099407028736
+          },
+          "second_preflight_state": {
+            "position": [
+              8.940696183401542e-09,
+              0.0,
+              1.6036279201507568
+            ],
+            "velocity": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "timestamp_ns": 1791019423932951808
+          },
+          "first_quality_pass": true,
+          "second_quality_pass": true,
+          "exact_first_map_reused": true,
+          "first_sim_s": 57.934235904000005,
+          "second_sim_s": 43.641931008,
+          "first_wall_s": 95.61419725418091,
+          "second_wall_s": 79.052889585495,
+          "first_path_m": 264.85963002512915,
+          "second_path_m": 230.2844765466582,
+          "first_original_distance_m": 0.9753317716448666,
+          "second_original_distance_m": 0.6734400161138456,
+          "first_endpoint_error_m": 0.9753317716448666,
+          "second_endpoint_error_m": 0.6734400161138456,
+          "collision": false,
+          "minimum_raw_clearance_m": 3.5242080005855714,
+          "minimum_inflated_clearance_m": 2.724208048269287,
+          "maximum_stopped_away_s": 0.4699392318725586
+        }
+      ],
+      "min_inflated_clearance_m": 2.6372591030777266,
+      "min_raw_clearance_m": 3.5242080005855714,
+      "max_stopped_away_s": 1.0351922512054443,
+      "p90_speed_range_mps": [
+        7.477120427953144,
+        7.754093060379793
+      ],
+      "max_actual_speed_mps": 8.155495488789347,
+      "max_endpoint_error_m": 0.9888612576091232,
+      "navigation_sim_s_sum": 496.19558528000005,
+      "path_m_sum": 2455.848959073681
+    }
+  ]
+}

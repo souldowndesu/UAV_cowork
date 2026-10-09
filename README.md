@@ -1,198 +1,107 @@
-# NavigationPhase1 —— 无人机自主导航 · 第一阶段 AirSim 实现
+# NavigationPhase1
 
-独立实验项目（无 LLM / 无 Agent / 无持久化地图），实现方案书《无人机避障方案》§60 的
-第一阶段实时导航闭环：
+无人机导航、持久建图、场景实验与飞行回放。当前目录于 2026-10-09 起整理，2026-10-10 完成验收；历史开发资料保存在 `archive/`，不参与运行。
 
-```
-AirSim State + LiDAR  →  Local Occupancy(3D 体素)  →  Truncated Distance Field
-        →  A*(3D)  →  B-spline 轨迹  →  Unified Control Coordinator(单一写者)
-```
+## 目录
 
-## 目录结构
-
-```
+```text
 NavigationPhase1/
-├── config.py            # 全部参数集中（§67 默认值，可被 scene_test.py 覆盖）
-├── settings.json        # 带 LiDAR 的 AirSim 配置（见下方「仿真器配置」）
-├── requirements.txt     # 依赖（scipy/pybind11 为可选加速项）
-├── run_phase1.py        # 主入口：起飞→爬升→闭环导航→到达→降落（含 --record/--visualize）
-├── scene_test.py        # 固定位置/固定任务实测脚本（调参用，含 --record/--visualize/--goal-z）
-├── replay.py            # 回放服务器：自动扫描 results/，页面下拉选择任意一次录制
-├── nav/                 # 导航栈核心模块
-│   ├── airsim_io.py     #   连接 / 状态 / LiDAR 点云 / 深度回退
-│   ├── occupancy.py     #   3D 滚动体素图（Free/Unknown/Occupied）
-│   ├── raycast.py       #   3D DDA 射线投射（C++ 或 numpy 回退）
-│   ├── distance_field.py#   截断欧氏距离场（scipy 或 BFS 回退）
-│   ├── astar.py         #   3D 26 连通 A*（3 态成本场）
-│   ├── bspline.py       #   均匀三次 B-spline + 平滑优化 + warm-start
-│   ├── coordinator.py   #   Unified Control Coordinator（唯一写者）
-│   ├── pipeline.py      #   四线程闭环 + 双缓冲地图快照
-│   ├── recorder.py      #   录制器（状态/点云/重规划）+ 录制库扫描
-│   └── web_server.py    #   可视化 Web 服务（实时 /api/live + 回放 /api/recordings）
-├── web/                 # 浏览器三维四视图页面
-│   └── viewer.html      #   点云 3D+俯视、路径 3D+俯视、HUD、拖动进度回放
-├── cpp/                 # C++ 加速扩展（pybind11）
-│   ├── fast_kernels.cpp #   3D DDA 射线投射内核
-│   ├── setup.py
-│   └── build_extension.bat
-└── tests/               # 纯离线单测（无需 AirSim）
+  scene_test.py          任意任务实验入口
+  replay.py              点云 / 模拟器 / examples 回放入口
+  fly.cmd                选择 1–24 号案例重新飞行
+  replay_scene.cmd       启动回放用模拟器
+  setup_env.cmd          安装运行环境
+  requirements.txt      转到 environment/requirements.txt
+  navigation/           导航算法、参数、持久地图实现
+    config.py           全部 Config 参数
+    profiles.py         safe5 / safe8 / legacy 配置
+    paths.py            统一的项目与数据路径
+    cpp/                C++ 加速源码和构建入口
+  experiments/          实验、重飞、录制、评估、回放实现
+    scene_test.py / mission.py / fly_examples.py
+    replay.py / simulator_replay.py / web_server.py / web/
+    recorder.py / evaluation.py / experiment.py
+    start_simulator.cmd / verify_examples.py / scenarios/
+  data/
+    examples/           24 条原始验证飞行、快照、参数和校验值
+    records/            新实验录像、遥测、评估；example_runs/ 为重飞记录
+    maps/               长期复用的持久地图
+  environment/          依赖、离线 wheels、模拟器 settings、许可、打包工具
+  docs/                 当前逻辑、参数、操作、数据格式文档
+  archive/              测试、旧文档、历史实验、临时产物与旧 ZIP
 ```
 
-## 环境要求
+根目录的 Python / CMD 文件只负责转到对应实现。直接执行 `experiments/` 中的工具或用 `python -m experiments.replay` 也可。所有工具指定的相对数据路径均以本项目根目录为基准；绝对路径不变，不随启动时的工作目录漂移。
 
-- 复用 `CompetitionEnv/.venv`（Python 3.10，已含 `airsim==1.8.1` / `numpy==1.26.3` /
-  `tornado==4.5.3` / `opencv`）。
-- 模拟器：`CompetitionEnv/CityEnviron/WindowsNoEditor/CityEnviron.exe`（Multirotor 城市环境）。
+## 环境
 
-### 可选加速依赖（缺失时自动退回纯 Python 实现，功能一致）
+验证环境：Windows x64、CPython 3.10 x64、AirSim 1.8.1、NumPy 1.26.3、SciPy 1.15.3、OpenCV 4.11.0.86。依赖版本见 `environment/requirements.txt`。双击 `setup_env.cmd`，使用离线 `environment/wheelhouse/` 创建项目内 `.venv` 并核对 C++ 加速模块。已有环境也可运行 `python -m pip install -r requirements.txt`。
 
-| 用途 | 依赖 | 回退 |
-| --- | --- | --- |
-| 距离场 EDT | `scipy`（C 后端优化库） | 多源 BFS chamfer 距离 |
-| 射线投射 | C++ `_fast`（pybind11 编译） | numpy 等距采样 |
+下面命令从项目根目录执行。分发包使用 `.venv\Scripts\python.exe`；当前 CompetitionEnv 工作区沿用上一级环境时换成 `..\.venv\Scripts\python.exe`。模拟器不包含在代码包内。普通实飞使用 `environment/settings.json` 配置；回放模拟器入口自动使用 `environment/settings_replay.json`，无需修改 Documents 中的 settings。
 
-```bash
-cd CompetitionEnv
-.venv\Scripts\pip.exe install scipy pybind11
+## 任意任务：scene_test
+
+先开启模拟器，再运行：
+
+```powershell
+# 交互式设置起点、目标、速度、录像与实时显示
+.venv\Scripts\python.exe scene_test.py
+
+# 指定目标，空地图开始；默认重置并实时保存录像
+.venv\Scripts\python.exe scene_test.py --goal-x 100 --goal-y 70 --goal-altitude 20 --profile safe5 --map-policy cold --max-duration 240
+
+# 明确起点和自定义速度，重复两轮
+.venv\Scripts\python.exe scene_test.py --start-x 0 --start-y 0 --start-z -0.5 --start-yaw 0 --goal-x 60 --goal-y 40 --goal-altitude 15 --speed 4 --v-max 5 --runs 2 --map-policy cold
+
+# 使用统一场景文件
+.venv\Scripts\python.exe scene_test.py --scenario experiments/scenarios/basic.json
+
+# 实飞同时查看点云、规划和速度：http://127.0.0.1:8767/
+.venv\Scripts\python.exe scene_test.py --goal-x 40 --goal-y 5 --visualize --viz-port 8767 --map-policy cold
 ```
 
-## 仿真器配置（一次性）
+默认配置 `safe5`；参数优先级：profile < 场景 JSON 的 config < 命令行。Config 字段都可以覆盖，例如 `--d-safe 3 --max-range 35 --flight-altitude 10`。坐标为 NED：X 北、Y 东、Z 向下；`--goal-altitude 20` 等同目标 `z=-20`。使用 `--no-record` 关闭录像，`--no-reset` 保留模拟器状态。默认记录在 `data/records/<时间戳>/`，多轮分别保存在 `run_00` 等目录。
 
-本项目 `settings.json` 已为载具 `Drone1` 增加 LiDAR（`SensorType=6`、16 通道、
-`DataFrame="VehicleInertialFrame"`）。
+## 回放
 
-> ⚠️ **关键坑**：AirSim 打包成 UE 游戏后，真正被读取的是
-> **`%USERPROFILE%\Documents\AirSim\settings.json`**（查找顺序里 `WindowsNoEditor\` 之前的
-> exe 深目录/启动目录在双击启动时都落空，最后掉到 `Documents\AirSim`）。若只改
-> `CityEnviron\WindowsNoEditor\settings.json` 会**不生效**，载具仍是默认 `SimpleFlight`、无 LiDAR。
-
-正确做法（两条都做，稳妥）：
-
-1. 关闭模拟器。
-2. 覆盖 exe 目录那份（备用）：
-   `Copy-Item NavigationPhase1\settings.json CityEnviron\WindowsNoEditor\settings.json -Force`
-3. 覆盖真正生效的那份（关键）：
-   `Copy-Item NavigationPhase1\settings.json "$env:USERPROFILE\Documents\AirSim\settings.json" -Force`
-4. 重新启动 `CityEnviron.exe`，确认 `listVehicles()` 返回 `Drone1`。
-
-> 若该构建不支持 LiDAR（`getLidarData` 持续为空），系统会自动切到前中相机
-> `DepthPerspective` 反投影点云（近似，忽略俯仰/横滚），无需改仿真器。
-
-## 运行
-
-```bash
-cd CompetitionEnv
-# 1) 自检 + 简单任务（目标：起点北 20m）
-NavigationPhase1\run_phase1.py --goal-x 20 --goal-y 0
-
-# 2) 固定场景实测（调参用）
-NavigationPhase1\scene_test.py --start-x 0 --start-y 0 --goal-x 40 --goal-y 5 --plot
+```powershell
+.venv\Scripts\python.exe replay.py
 ```
 
-`scene_test.py` 会瞬移到固定起点、执行固定任务、把遥测（位置/速度/净空/制动/目标距离/
-碰撞）写到 `NavigationPhase1/results/<时间戳>/`（JSON + CSV），并打印路径长度、最小净空、
-均/峰值速度、制动占比等汇总；`--plot` 画 2D 俯视轨迹图。
+浏览器打开 **http://127.0.0.1:8765/**，选择“运行记录”或“飞行示例 · 24 次验证”，再选择飞行。无需模拟器即可看点云、已飞轨迹、A*、平滑轨迹与持久地图。播放、倍速和进度拖动均在同一网页。服务持续运行到 Ctrl+C，旧参数 `--serve` 保留兼容。
 
-## 录制与回放（三维四视图）
+建筑背景回放：双击 `replay_scene.cmd` 启动回放用模拟器，运行同一个 `replay.py`，网页勾选“模拟器场景”。它显示建筑和无人机实际模型，按原录像恢复位姿与当时预测。左键旋转，Shift / 右键平移，滚轮缩放，双击或“重置视角”恢复预设；顶部可切换跟随、俯视、整条路线。手动视角在播放与暂停时保留。
 
-导航是**真三维**（3D 体素 + 26 连通 A* + 3D 距离场 + 3D B-spline）。目标默认在巡航高度
-`-flight_altitude`，给 `--goal-z` 一个不同高度即触发三维路径（爬升/下降）。
+```powershell
+# 模拟器安装在其他位置
+.\replay_scene.cmd "C:\AirSim\CityEnviron.exe"
 
-### 1) 录制 / 实时观看（推荐：直接终端交互）
-
-**直接运行 `scene_test.py`（不带参数）即可**，终端会逐项询问，包括是否录制、是否四视图、
-目标高度等，回车用默认值（录制/四视图默认开）：
-
-```bash
-cd CompetitionEnv
-NavigationPhase1\scene_test.py
-#   起点 X (北, 米) [默认 0.0]:
-#   起点 Y (东, 米) [默认 0.0]:
-#   目标 X (北, 米) [默认 40.0]:
-#   目标 Y (东, 米) [默认 5.0]:
-#   巡航高度 (米) [默认 8.0]:
-#   目标高度 (米, 回车=同巡航高度→二维) [默认 8.0]:    ← 给不同高度即三维路径
-#   是否录制完整过程 [默认 y]:
-#   是否启动三维四视图 [默认 y]:                        ← 运行中开 http://127.0.0.1:8765/
-#   是否画轨迹图 [默认 n]:
+# 指定录像目录和网页端口；相对目录锚定项目根目录
+.venv\Scripts\python.exe replay.py --results-dir data/records/example_runs --port 8770
 ```
 
-命令行方式仍可用（等价覆盖）：`--record` 录制、`--visualize` 四视图、`--goal-z -12` 三维目标。
+`--simulator` 可启动即显示场景，`--no-simulator` 仅提供点云。场景必须与录像一致；场景回放会暂停物理，播放已保存的位置和姿态。要重新运行导航使用 `fly.cmd` 或 `scene_test`。启动器会拒绝重复启动正在运行或加载中的模拟器。
 
-```bash
-# 三维目标（12m 高度）+ 录制
-NavigationPhase1\scene_test.py --goal-x 40 --goal-y 5 --goal-z -12 --record
+## examples 重飞
+
+双击 `fly.cmd`，输入 1–24 选择案例，输入 `q` 退出。新结果保存到 `data/records/example_runs/`，24 条原始示例保持不变。
+
+```powershell
+.\fly.cmd --list
+.\fly.cmd --case 10 --repeat 3
+.venv\Scripts\python.exe experiments/fly_examples.py --case 10 --dry-run
+.venv\Scripts\python.exe experiments/verify_examples.py
 ```
 
-录制结果写到 `results/<时间戳>/recording.json`（外加 `meta.json` 元信息侧车）。
+首飞每轮从空地图开始；复飞每轮恢复对应目标的原始首飞快照，并校验 SHA-256。重飞会重新感知、规划和执行，精确回看原始记录使用 replay。
 
-### 3) 回放（自动扫描 + 页面下拉选择 + 拖动进度）
+## 文档与维护
 
-```bash
-cd NavigationPhase1
-..\.venv\Scripts\python.exe replay.py
-```
+- [现有导航与持久化逻辑](docs/NAVIGATION.md)
+- [完整参数表与覆盖方式](docs/PARAMETERS.md)
+- [实验、回放和重飞操作](docs/EXPERIMENTS.md)
+- [保存数据与路径约定](docs/DATA.md)
 
-`replay.py` 会自动扫描 `results/` 下所有录制并列出；浏览器打开
-`http://127.0.0.1:8765/`，在页面顶部**下拉框选择某次录制**，下方进度条可拖到任意时间点。
-页面含四视图：点云 3D + 俯视、路径 3D + 俯视，HUD 显示位置/速度/加速度。
+旧 tests 与文档位于 `archive/20261009_cleanup/`，移动清单为其中的 `moves.json`；没有永久删除。归档测试已更新导入，可用 `python -m pytest archive/20261009_cleanup/tests` 运行。归档诊断脚本和旧报告保留历史路径，不作为当前使用说明。
 
-### 调参（覆盖 config.py 默认值）
-
-```bash
-scene_test.py --res 0.25 --dmax 4 --dsafe 1.0 --c-unknown 8 --w-obs 1.5 --v-max 4 ...
-```
-
-关键参数（详见方案书 §21/§24/§31–§35/§67）：
-
-| 参数 | 默认 | 含义 |
-| --- | --- | --- |
-| `res` | 0.2 | 体素分辨率 r_L（米） |
-| `d_max` | 4.0 | 截断距离场上限（米） |
-| `d_safe` | 0.8 | 障碍安全距离（米，φ(D) 生效阈值） |
-| `c_unknown` | 5.0 | Unknown 路径代价（相对 Free=1） |
-| `w_obs` | 1.0 | 障碍距离代价权重 |
-| `w_smooth` / `w_dyn` | 0.6 / 0.4 | B-spline 平滑 / 动力学权重 |
-| `v_max` / `a_max` | 8.0 / 2.0 | 速度 / 加速度上限 |
-
-## 编译 C++ 加速扩展（可选，需 VS BuildTools + 网络装 pybind11）
-
-```bat
-cd NavigationPhase1\cpp
-build_extension.bat
-```
-
-成功后 `nav/_fast.pyd` 生成，`raycast.py` 自动走 C++ 路径（`test_raycast.py` 会打印
-`using fast=True`）。编译失败不影响运行（numpy 回退）。
-
-## 坐标约定（NED）
-
-+**X 北 / +Y 东 / +Z 向下**，向上飞 = z 减小（高度传负值，`z=-8` 表示离地 8m）。
-
-## 离线单测（无需启动模拟器）
-
-```bash
-cd NavigationPhase1
-..\.venv\Scripts\python.exe tests\test_occupancy.py
-..\.venv\Scripts\python.exe tests\test_raycast.py
-..\.venv\Scripts\python.exe tests\test_distance_field.py
-..\.venv\Scripts\python.exe tests\test_astar.py
-..\.venv\Scripts\python.exe tests\test_bspline.py
-..\.venv\Scripts\python.exe tests\test_coordinator.py
-```
-
-## 架构要点（对应方案书章节）
-
-- **三态体素图** Free/Unknown/Occupied（§21），滚动窗口 + 整格平移（§11–§12）。
-- **3D DDA 射线投射**（§14），LiDAR 命中点置 Occupied、沿途置 Free、未观测保持 Unknown。
-- **截断距离场** D=min(d,D_max)，仅 Occupied 参与，Unknown 不参与（§18–§19）。
-- **3D A***（§24），成本场 Free < Unknown < Occupied，Unknown 可通行但高代价（§22–§23）。
-- **B-spline 平滑优化**（§29–§35），目标/障碍/平滑/动力学四代价 + warm-start（§30）。
-- **Unified Control Coordinator**（§41–§46），PD 跟踪 + 速度/加速度投影 + 紧急制动，
-  **全程序只有该对象调用 `move*`（Single Writer）**。
-- **四线程** Sensor/Mapping/Planning/Control（§51–§52），Mapping↔Planning 用双缓冲快照（§53）。
-
-## 未实现（留待后续阶段）
-
-Persistent Map / Route Cache（Phase 2）、Unknown 优先级精调（Phase 3）、Unknown 安全速度
-`L_known/d_stop`（Phase 4）、长期地图复用（Phase 5）、移动目标追踪（Phase 6）、SLAM/VIO（Phase 7）。
+分发包用 `python environment/package_release.py` 生成到 `environment/releases/`，排除整个 archive、测试临时输出、虚拟环境和缓存。第三方声明见 `environment/THIRD_PARTY_NOTICES.md`。目录迁移验收数据保存在 `docs/validation_20261009.json`。
